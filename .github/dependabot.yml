@@ -16,6 +16,10 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 2
+    ignore:
+      # Python 3.14 is pinned across docs, CI and lock files; move lines by hand.
+      - dependency-name: python
+        update-types: [version-update:semver-major, version-update:semver-minor]
   # Nginx image in compose.yaml and compose.test.yaml must stay identical.
   - package-ecosystem: docker-compose
     directory: /
@@ -26,3 +30,6 @@ updates:
       # Built locally from the Dockerfile; not published to any registry.
       - dependency-name: mihomo-config-manager-admin
       - dependency-name: mihomo-config-manager-test
+      # Stay on the stable 1.30.x line; odd minors are nginx mainline.
+      - dependency-name: nginx/nginx-unprivileged
+        update-types: [version-update:semver-major, version-update:semver-minor]
