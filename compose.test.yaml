@@ -66,7 +66,9 @@ services:
     volumes:
       - test-fixtures:/fixtures:ro
     read_only: true
-    tmpfs: ["/tmp:size=128m,mode=1777"]
+    # Docker mounts tmpfs noexec by default; tests run stub docker/id/flock
+    # executables from pytest's tmp_path. Test runner only, never production.
+    tmpfs: ["/tmp:size=128m,mode=1777,exec"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: 256m
