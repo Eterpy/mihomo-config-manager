@@ -1,0 +1,2 @@
+"""Mihomo Config Manager."""
+

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="color-scheme" content="light dark">
+  <title>Mihomo · 配置管理</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Mihomo 配置管理首页"><span class="brand-icon">M</span><span>Mihomo<span class="brand-sub">CONFIG MANAGER</span></span></a>
+    <div class="top-actions"><span class="private-label"><span class="dot"></span>私有工作空间</span><button id="theme" class="icon-button" aria-label="切换主题">跟随系统</button></div>
+  </header>
+  <main>
+    <section class="page-heading">
+      <div><p class="eyebrow">你的配置，井然有序</p><h1>配置管理</h1><p class="lead">集中保存 Mihomo 配置，让每个订阅始终保持更新。</p></div>
+      <button class="primary" id="upload-top"><span aria-hidden="true">＋</span> 上传配置</button>
+    </section>
+    <section class="overview" aria-label="配置概况">
+      <div><span class="metric-label">全部配置</span><strong id="total">—</strong><span class="metric-note">份 YAML 文件</span></div>
+      <div><span class="metric-label">已启用</span><strong id="enabled">—</strong><span class="metric-note">订阅可用</span></div>
+      <div class="status-metric"><span class="metric-label">运行状态</span><strong id="service-status" class="status-text">正在连接</strong><span class="metric-note">Cloudflare Access 保护</span></div>
+    </section>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <section id="dropzone" class="dropzone" aria-label="拖拽上传区域">
+      <div class="upload-symbol" aria-hidden="true">↑</div>
+      <div><h2>拖入配置，开启订阅</h2><p>支持 .yaml / .yml · 单文件不超过 {{ max_mib }} MiB · 保留原始格式与注释</p></div>
+      <button id="upload-select" class="secondary">选择文件</button>
+      <input id="file-input" type="file" accept=".yaml,.yml" multiple hidden>
+      <input id="replace-input" type="file" accept=".yaml,.yml" hidden>
+    </section>
+    <section class="library">
+      <div class="section-heading"><h2>配置库 <span id="count-badge">0</span></h2><div class="list-tools"><label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索名称或文件名" aria-label="搜索名称或文件名"></label><button id="refresh" class="icon-button">刷新</button></div></div>
+      <div id="list" class="config-grid" aria-live="polite"></div>
+      <div id="empty" class="empty" hidden><span class="empty-icon" aria-hidden="true">{ }</span><h3>从第一份配置开始</h3><p>上传后会自动生成独立订阅链接。更新文件时，链接保持不变。</p></div>
+      <div id="no-results" class="empty" hidden><h3>没有找到匹配的配置</h3><p>试试其他名称或文件名。</p></div>
+    </section>
+      <section class="backup-section"><h2>加密备份</h2><p>备份包含全部配置和历史。密码遗失无法恢复；恢复会重置全部订阅链接。</p><button id="backup-new">创建加密备份</button><button id="backup-refresh">刷新备份</button><div id="backup-list"></div></section>
+  <footer><span class="footer-mark">M</span><p>订阅链接是读取凭据，请妥善保管。泄露时可重置 Token 撤销旧链接。</p><span class="version">V0.3.0</span></footer>
+  </main>
+  <template id="card-template">
+    <article class="config-card">
+      <div class="card-top"><div class="file-icon" aria-hidden="true">YML</div><div class="card-title"><h3 data-field="name"></h3><p data-field="filename"></p></div><span class="badge" data-field="badge"></span></div>
+      <p class="description" data-field="description" hidden></p>
+      <div class="metadata"><span data-field="size"></span><span data-field="version"></span><time data-field="updated"></time></div>
+      <details class="checksum"><summary>SHA-256 <code data-field="short-sha"></code></summary><code data-field="sha256"></code></details>
+      <div class="card-actions"><button class="copy-button" data-action="copy">复制订阅链接 <span aria-hidden="true">↗</span></button><button data-action="preview">预览</button><button data-action="history">历史版本</button><button data-action="replace" data-write>上传新版本</button></div>
+      <div class="card-secondary"><button data-action="rename" data-write>修改名称</button><button data-action="toggle" data-write></button><button data-action="rotate" data-write>重置 Token</button><button data-action="delete" data-write class="danger-text">删除</button></div>
+    </article>
+  </template>
+
+  <dialog id="backup-dialog"><form id="backup-form"><h2>创建加密备份</h2><label class="form-label">密码（16–256 个字符）<input id="backup-password" type="password" minlength="16" maxlength="256" required autocomplete="new-password"></label><label class="form-label">确认密码<input id="backup-confirm" type="password" required autocomplete="new-password"></label><button type="button" data-close="backup-dialog">取消</button><button type="submit">创建</button></form></dialog>
+  <dialog id="history-dialog"><div class="dialog-heading"><h2>历史版本</h2><button data-close="history-dialog">关闭</button></div><div id="history-list"></div></dialog>
+  <dialog id="preview-dialog"><div class="dialog-heading"><div><p class="eyebrow">原始 YAML · 只读预览</p><h2 id="preview-title"></h2></div><button class="icon-button" data-close="preview-dialog" aria-label="关闭预览">✕</button></div><pre id="preview-content"></pre></dialog>
+  <dialog id="rename-dialog"><form id="rename-form"><div class="dialog-heading"><h2>修改配置信息</h2><button type="button" class="icon-button" data-close="rename-dialog" aria-label="取消">✕</button></div><label class="form-label">显示名称<input id="rename-name" required maxlength="100" autocomplete="off"></label><label class="form-label">说明（可选）<textarea id="rename-description" maxlength="2000" rows="3"></textarea></label><div class="dialog-footer"><button type="button" data-close="rename-dialog">取消</button><button type="submit" class="primary">保存修改</button></div></form></dialog>
+  <dialog id="link-dialog"><div class="dialog-heading"><h2>订阅链接</h2><button class="icon-button" data-close="link-dialog" aria-label="关闭">✕</button></div><p>浏览器未允许自动复制，请手动复制下方链接。</p><label class="form-label">请勿公开分享<input id="link-value" readonly></label></dialog>
+</body>
+</html>

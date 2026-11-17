@@ -1,0 +1,76 @@
+# Disposable, isolated test stack. No host ports, no production .env or data.
+services:
+  init:
+    build: {context: ., target: test}
+    image: mihomo-config-manager-test:0.3.0
+    user: "0:0"
+    command: [python, -m, tests.container_setup]
+    network_mode: none
+    volumes:
+      - test-data:/data
+      - test-published:/data/published
+      - test-fixtures:/fixtures
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: [no-new-privileges:true]
+  admin:
+    image: mihomo-config-manager-test:0.3.0
+    user: "10001:10001"
+    command: [uvicorn, "tests.test_server:create_test_app", --factory, --host, "0.0.0.0", --port, "8000", --workers, "1", --no-access-log, --no-proxy-headers, --no-server-header]
+    depends_on:
+      init: {condition: service_completed_successfully}
+    volumes:
+      - test-data:/data
+      - test-published:/data/published
+      - test-fixtures:/fixtures:ro
+    read_only: true
+    tmpfs: ["/tmp:size=128m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 64
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+  public:
+    image: nginx/nginx-unprivileged:1.30.6-alpine3.24@sha256:ea4fd7ab5a8dc6348c18240bd3546f355f8373cd8f112580f7d8bd8ff5a74772
+    user: "101:101"
+    entrypoint: [nginx]
+    command: [-g, "daemon off;"]
+    depends_on:
+      admin: {condition: service_healthy}
+    volumes:
+      - test-published:/published:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    read_only: true
+    tmpfs: ["/tmp:size=8m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    pids_limit: 32
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8081/healthz"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+  runner:
+    image: mihomo-config-manager-test:0.3.0
+    user: "10001:10001"
+    command: [python, -m, pytest, -q, -p, "no:cacheprovider", -m, container]
+    depends_on:
+      public: {condition: service_healthy}
+    environment: {MCM_CONTAINER_TEST: "1"}
+    volumes:
+      - test-fixtures:/fixtures:ro
+    read_only: true
+    tmpfs: ["/tmp:size=128m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+volumes:
+  test-data:
+  test-published:
+  test-fixtures:
