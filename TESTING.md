@@ -37,7 +37,9 @@ sh scripts/test-containers.sh
 
 脚本构建固定镜像、运行 Python 测试、启动临时 admin/public、检查 Nginx 配置、运行 HTTP 用例并确认公开日志为空。没有宿主机端口或生产环境挂载，退出清理本次项目的容器和命名卷。仅初始化测试卷的容器使用 root，生产服务非 root。
 
-GitHub Actions 配置了上述 Python 和容器任务；仓库实际运行后的 CI 状态才代表该环境验证结果。
+测试 runner 的 `/tmp` 允许执行程序，因为 `backup.sh` 和预检脚本的测试会运行模拟的 `docker`、`id`、`flock` 等命令；这只用于一次性测试容器。初始化容器可能被 `docker compose run` 重复执行，它不会覆盖已生成的测试签名密钥。
+
+GitHub Actions 的 `source-and-tests` 与 `containers` 任务分别对应上面的 Python 测试与隔离容器验收；仓库实际运行后的 CI 状态才代表该环境验证结果。
 
 ## 发布与语法检查
 
@@ -52,28 +54,22 @@ for script in scripts/*.sh; do sh -n "$script"; done
 
 Node 仅用于语法检查，生产不需要。发布检查应与人工审查、Git 历史检查配合，不代表完整的秘密扫描。
 
-## 本次本地验证
+## 未覆盖的范围
 
-日期：2026-11-17。环境：macOS、Python 3.14.0。
+以下内容无法由仓库内测试验证，需要部署者在目标环境验收：
 
-| 检查 | 结果 |
-|---|---|
-| 非容器 Python 全量测试 | 155 passed、1 skipped（Linux RLIMIT_AS）、6 deselected |
-| 原生 Nginx 1.30.6 配置与真实 HTTP | 配置通过；6 passed；测试进程与临时数据已清理 |
-| 生产 / 测试 Compose 结构 | 独立 Compose 工具验证通过；未启动容器 |
-| JS / 所有 Shell 语法、pip check | 通过 |
-| 发布检查 | 68 个白名单文件，无内置规则命中；另行核查移除的个人标识、邮箱和非本机 IP |
-| 实际源码包与 Git 索引回归 | 文件白名单、归档元数据、秘密模式和强制暂存敏感文件的拒绝测试通过 |
-| GitHub YAML / 本地文档链接 | 结构和目标存在性检查通过；未在 GitHub 执行工作流 |
+- 真实 Docker 容器中的交互式恢复与中断续作（`backup.sh` 的控制流测试使用模拟 Docker）。
+- Cloudflare Access 身份策略、Tunnel、Cache Bypass 与真实客户端的更新和撤销。
+- 宿主机端口从外部不可达、目标平台的资源限制与实际镜像系统包。
 
-测试保留一条 Starlette 测试客户端的弃用警告。没有 Docker daemon，未执行本次容器构建和交互式容器恢复；没有把此前记录中的漏洞数据库查询当作本次已执行的检查。
+固定依赖与镜像不代表持续不存在已知漏洞；发布前应另外检查当前漏洞数据库和实际镜像系统包。
 
-目标 Linux 容器、真实 Cloudflare、客户端和交互式恢复仍需部署者验收。固定依赖与镜像不代表持续不存在已知漏洞；发布前应另外检查当前漏洞数据库和实际镜像系统包。
+## 最近验证记录
 
-## 0.3.0 公开发布复核（2026-11-18）
+| 日期 | 环境 | 检查 | 结果 |
+|---|---|---|---|
+| 2026-11-18 | GitHub Actions，`main` 提交 `f71f175` | `source-and-tests`：发布检查、全量 Python 测试、语法与依赖检查、源码打包 | 通过；156 passed（Linux 上含 RLIMIT_AS 测试） |
+| 2026-11-18 | GitHub Actions，`main` 提交 `f71f175` | `containers`：容器内 Python 测试、真实 HTTP 用例、Nginx 配置、公开日志为空 | 通过；容器内 152 passed，HTTP 6 passed |
+| 2026-11-17 | macOS，本机 Nginx 1.30.6 | `tests.run_native` 真实 HTTP | 配置检查通过；6 passed |
 
-- 当前源码重新执行非容器全量测试：155 passed、1 skipped（Linux RLIMIT_AS）、6 deselected，保留同一条测试客户端弃用警告。
-- 68 个公开文件通过发布规则检查，另外确认此前移除的个人标识没有重新出现；版本号和本地文档链接一致。
-- JS、全部 Shell 语法以及生产 / 测试 Compose 结构检查通过。
-- 重新生成与当前源码逐文件一致的 0.3.0 发布目录、ZIP 和 tar 包；在临时新 Git 仓库暂存这 68 个文件后，索引内容检查通过。
-- 本轮未重复原生 Nginx HTTP 测试；未运行 Docker 或真实 Cloudflare，未向 GitHub 上传内容。
+测试输出保留一条 Starlette 测试客户端的 httpx 弃用警告。

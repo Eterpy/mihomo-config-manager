@@ -19,9 +19,30 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-编辑 `.env`，替换 Team Domain、AUD、管理域名和订阅 HTTPS URL。示例值会被启动校验拒绝。不要用公开 issue 或截图分享完整环境文件。
+编辑 `.env`，替换 Team Domain、AUD、管理域名和订阅 HTTPS URL。不要用公开 issue 或截图分享完整环境文件。
 
 服务端会独立校验 JWT 的 RS256 签名、issuer、audience、有效期和主体，不信任单独的邮箱头。[Cloudflare JWT 验证说明](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/)
+
+## 环境变量
+
+| 变量 | 要求 / 默认值 |
+|---|---|
+| `CF_ACCESS_TEAM_DOMAIN` | 必填，例如自己的 `TEAM.cloudflareaccess.com` |
+| `CF_ACCESS_AUD` | 必填，管理端 Access 应用的 AUD |
+| `ADMIN_HOSTNAME` | 必填，管理域名，无协议、端口或路径 |
+| `PUBLIC_BASE_URL` | 必填，订阅域名的 HTTPS URL；与管理域名不同，无端口、路径、凭据或查询参数 |
+| `APP_ENV` | `production`；也接受 `development`，不影响认证要求 |
+| `MAX_UPLOAD_MIB` | `10`；范围 1–100 |
+| `HISTORY_VERSIONS` | `5`；当前版本以外的保留数量，范围 0–100 |
+| `YAML_TIMEOUT_SECONDS` | `5`；大于 0 且不超过 30 |
+| `YAML_MEMORY_MIB` | `256`；范围 64–1024，Linux 解析子进程使用 RLIMIT_AS |
+| `BACKUP_MAX_MIB` | `1024`；单次备份内容上限 |
+| `BACKUP_QUOTA_MIB` | `2048`；已完成备份的总容量上限，不小于单次上限；两者最大 102400 |
+| `DATA_DIR` | Compose 固定为 `/data`；直接运行时默认为工作目录下的 `data` |
+
+示例值、缺失的域名或认证参数都会让 admin 拒绝启动；`APP_ENV=development` 同样需要真实认证参数。直接用 Uvicorn 启动时，须由调用环境提供变量：应用不会自动加载 `.env`，Compose 会加载。
+
+提高上传或备份限制后，应重新检查容器内存、临时空间和磁盘容量。程序只支持一个写入实例、一个 Uvicorn worker，不能通过增加副本共享同一个数据目录。备份容量的规划见 [备份与恢复](backup-restore.md)。
 
 ## 测试与启动
 
@@ -70,6 +91,6 @@ curl -i http://127.0.0.1:18080/
 3. 下载响应包含 `no-store`，Cloudflare 不应返回缓存 HIT；测试同秒更新与条件请求。
 4. 停用、重置 Token、删除完成后，真实域名下的旧链接不可读；其他配置不受影响。
 5. 从服务器以外检查宿主机 18080/18081 不能直接访问。
-6. 使用临时样例演练加密备份、恢复和中断续作；恢复后旧链接不可用，再使用真实数据。
+6. 使用临时样例演练加密备份、恢复和中断续作，确认恢复后旧链接不可用，再使用真实数据。演练方法见 [备份与恢复](backup-restore.md) 的「恢复演练」。
 
 不要把真实 URL 直接写在 shell 历史里。管理访问日志和公开请求日志默认关闭；排障可检查健康状态、HTTP 状态码和 Nginx 语法，不要把请求内容或链接输出到公开日志。
