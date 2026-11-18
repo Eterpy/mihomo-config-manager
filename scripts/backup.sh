@@ -60,6 +60,18 @@ fi
 if [ "$state" = prepared ]; then
     [ ! -e data.before-restore ] || { echo '请先妥善移走 data.before-restore，保留它以便人工恢复。' >&2; exit 1; }
     if [ -d data ]; then
+        # admin creates the writer lock on first start; data initialized but
+        # never opened has none. Create it as admin would, so the move is still
+        # locked: noclobber refuses existing paths and links, and chown -h never
+        # follows one. Ownership matters if this restore is abandoned.
+        for path in data/db data/db/.writer.lock; do
+            [ ! -L "$path" ] || { echo '拒绝符号链接恢复路径。' >&2; exit 1; }
+        done
+        if [ ! -d data/db ]; then mkdir data/db; chown -h 10001:10001 data/db; fi
+        if [ ! -e data/db/.writer.lock ]; then
+            (set -C; : > data/db/.writer.lock)
+            chown -h 10001:10001 data/db/.writer.lock
+        fi
         (
           flock -n 9 || { echo '数据仍被其他进程使用。' >&2; exit 1; }
           mv data data.before-restore

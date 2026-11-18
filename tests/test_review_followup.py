@@ -107,6 +107,79 @@ esac
     assert item['subscription_url'].encode() not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize('lock', ['missing', 'no_db', 'symlink'])
+def test_resume_moves_data_admin_never_opened(tmp_path, settings, lock):
+    """A new host runs init-data.sh but never starts admin, so no writer lock exists."""
+    from dataclasses import replace
+    from app.services import Store
+    from app.restore_guard import token_fingerprint
+
+    script_source = ROOT / 'scripts/backup.sh'
+    if not script_source.exists():
+        pytest.skip('host restore controller is not in the production image')
+    project = tmp_path / 'project'
+    scripts = project / 'scripts'
+    scripts.mkdir(parents=True)
+    (scripts / 'backup.sh').write_text(script_source.read_text().replace('[ -t 0 ]', 'true'))
+    (scripts / 'init-data.sh').write_text('exit 0\n')
+    (project / '.restore-state').write_text('prepared')
+    work = project / '.restore-work'
+    work.mkdir()
+    source = tmp_path / 'sample.yaml'
+    source.write_bytes(b'proxies: []\n')
+    store = Store(replace(settings, data_dir=work / 'data'))
+    store.create(source, 'test.yaml', 'test')
+    with store.db.connect() as con:
+        proof = token_fingerprint(con)
+    store.close()
+    (work / 'data/.restore-proof').write_text(proof)
+    (work / 'expected-proof').write_text(proof)
+    for directory in ['data/private', 'data/published'] + ([] if lock == 'no_db' else ['data/db']):
+        (project / directory).mkdir(parents=True)
+    outside = tmp_path / 'outside-lock'
+    outside.write_bytes(b'')
+    if lock == 'symlink':
+        (project / 'data/db/.writer.lock').symlink_to(outside)
+    binaries = tmp_path / 'bin'
+    binaries.mkdir()
+    for name, body in {
+        'id': '#!/bin/sh\necho 0\n',
+        'flock': '#!/bin/sh\nexit 0\n',
+        'sync': '#!/bin/sh\nexit 0\n',
+        'chown': '#!/bin/sh\nprintf "chown %s\\n" "$*" >> "$AUDIT_LOG"\n',
+        'docker': '''#!/bin/sh
+printf '%s\\n' "$*" >> "$AUDIT_LOG"
+case "$*" in
+  *app.restore_guard*) "$TEST_PYTHON" -m app.restore_guard "$TEST_PROJECT/data" "$TEST_PROJECT/.restore-work/expected-proof";;
+  *) exit 0;;
+esac
+''',
+    }.items():
+        path = binaries / name
+        path.write_text(body)
+        path.chmod(0o700)
+    import sys
+    log = tmp_path / 'commands'
+    result = subprocess.run(['sh', str(scripts / 'backup.sh'), 'resume'], capture_output=True,
+                            env=dict(os.environ, PATH=str(binaries)+':'+os.environ['PATH'],
+                                     PYTHONPATH=str(ROOT), TEST_PYTHON=sys.executable,
+                                     TEST_PROJECT=str(project), AUDIT_LOG=str(log)))
+    if lock in {'missing', 'no_db'}:
+        assert result.returncode == 0, result.stderr.decode()
+        created = project / 'data.before-restore/db/.writer.lock'
+        assert created.is_file() and not created.is_symlink()
+        assert (project / 'data/.restore-proof').read_text() == proof
+        commands = log.read_text()
+        assert 'chown -h 10001:10001 data/db/.writer.lock' in commands
+        assert ('chown -h 10001:10001 data/db\n' in commands) == (lock == 'no_db')
+        assert 'compose up -d --wait public' in commands
+    else:
+        assert result.returncode != 0
+        assert (project / 'data/db').is_dir() and not (project / 'data.before-restore').exists()
+        assert 'compose up' not in log.read_text()
+    assert outside.read_bytes() == b''
+
+
 @pytest.fixture
 def release_source(tmp_path):
     script = ROOT / 'scripts/package_release.py'
