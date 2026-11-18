@@ -97,7 +97,7 @@ sudo sh scripts/backup.sh restore /root/restore/备份ID.mcmbackup
 ```sh
 git clone https://github.com/Eterpy/mihomo-config-manager.git /opt/mihomo-config-manager
 cd /opt/mihomo-config-manager
-git checkout v0.3.0                  # 换成旧机器实际运行的版本
+git checkout v0.3.1                  # 换成旧机器实际运行的版本
 cp .env.example .env && chmod 600 .env
 # 编辑 .env：填写新机器使用的 Access Team Domain、AUD、管理域名和订阅域名
 sudo sh scripts/init-data.sh

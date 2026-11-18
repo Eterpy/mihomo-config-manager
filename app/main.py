@@ -77,7 +77,7 @@ def create_app(settings=None, verifier=None):
             await asyncio.to_thread(app.state.backups.close)
             await asyncio.to_thread(app.state.store.close)
 
-    app = FastAPI(title="Mihomo Config Manager", version="0.3.0", lifespan=lifespan, docs_url=None, redoc_url=None,
+    app = FastAPI(title="Mihomo Config Manager", version="0.3.1", lifespan=lifespan, docs_url=None, redoc_url=None,
                   telemetry={"auto_configure": False, "tracing": False, "metrics": False, "logs": False, "operation_spans": False})
     app.state.settings = settings
     app.state.csrf = csrf

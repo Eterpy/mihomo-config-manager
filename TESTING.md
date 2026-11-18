@@ -68,6 +68,8 @@ Node 仅用于语法检查，生产不需要。发布检查应与人工审查、
 
 | 日期 | 环境 | 检查 | 结果 |
 |---|---|---|---|
+| 2026-11-18 | macOS，Python 3.14，0.3.1 版本号更新后 | 全量 Python 测试；恢复相关测试另以 dash 运行；Shell / JS 语法；发布检查与源码打包 | 通过；158 passed、1 skipped（RLIMIT_AS）；dash 下 61 passed；70 个文件无规则命中 |
+| 2026-11-18 | GitHub Actions，`main` 提交 `0a9d283`（与 0.3.1 仅差版本号） | `source-and-tests` / `containers` | 通过；159 passed；容器内 155 passed，HTTP 6 passed |
 | 2026-11-18 | GitHub Actions，`main` 提交 `f71f175` | `source-and-tests`：发布检查、全量 Python 测试、语法与依赖检查、源码打包 | 通过；156 passed（Linux 上含 RLIMIT_AS 测试） |
 | 2026-11-18 | GitHub Actions，`main` 提交 `f71f175` | `containers`：容器内 Python 测试、真实 HTTP 用例、Nginx 配置、公开日志为空 | 通过；容器内 152 passed，HTTP 6 passed |
 | 2026-11-17 | macOS，本机 Nginx 1.30.6 | `tests.run_native` 真实 HTTP | 配置检查通过；6 passed |
