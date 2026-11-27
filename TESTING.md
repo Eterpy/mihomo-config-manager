@@ -74,6 +74,16 @@ Node 仅用于语法检查，生产不需要。发布检查应与人工审查、
 
 | 日期 | 环境 | 检查 | 结果 |
 |---|---|---|---|
+| 2026-11-28 | macOS，Python 3.14，Bash 3.2 / dash | 0.4.0 提交前：恢复前的应用配置校验只在停服前运行（`restore`，以及 `data` 仍在原处的 `prepared` 续作），不再依赖匿名卷覆盖 `/data` | 非容器 263 passed、1 skipped（Linux 内存限制）；恢复控制器测试在两种 shell 下各 42 passed。Docker 生命周期使用桩命令，Linux 实机恢复演练待验证 |
+| 2026-11-28 | macOS，Python 3.14，Bash 3.2 / dash | 0.4.0 最终审查：真实 SQLite 恢复核验、public 启动失败后保留停用操作、信号清理、已停止项目冲突、配置预检、快照并发读取 | 非容器 258 passed、1 skipped（Linux 内存限制）；两种 shell 的相关测试各 101 passed。暂停快照复制时，本机列表和取链接各约 1.5 ms |
+| 2026-11-28 | Chromium、本机 Nginx | 重新登录、状态提示消退、改名不可写及冲突后保留输入、重复回滚、HTTP 下载 | 浏览器场景通过，真实 HTTP 6 passed。Docker 生命周期使用桩命令；Linux 实机断线清理与恢复演练待验证 |
+| 2026-11-28 | macOS，Python 3.14，Chromium、本机 Nginx | 文件校验与修复提示、损坏条目隔离、删除后的旧库提示、并发分段校验、刷新期间追加拖入 | 非容器 248 passed、1 skipped；真实 HTTP 6 passed。8 个并发 Range 与 1 个 HEAD 共计算一次完整摘要；替换归档后重新校验，同大小篡改被拒绝。Chromium 中两种修复提示及追加拖入通过 |
+| 2026-11-28 | macOS，Python 3.14，0.4.0 最新复查 | 存储启动一致性、同内容修复、离线目标目录竞争、备份 Range / HEAD、镜像 COPY 清单、预检 | 非容器 246 passed、1 skipped（Linux 内存限制）。本机 Nginx HTTP 6 passed。0.3.1 归档经新版准备后可启动 |
+| 2026-11-28 | 本机 Chrome，临时预览 | 快照结束自动刷新、关闭回滚窗口、删除配置、混合批量上传及追加拖入、确认期间改写磁盘文件 | 通过。关闭的窗口保持关闭，已删除配置的历史清空，无未捕获异常；上传保存了确认时的文件字节 |
+| 2026-11-28 | Docker 构建验收 | CI 构建两个镜像并按发布清单核对 `/opt/app` 内的实际文件 | 本机缺少 Docker，实际构建及 GitHub Actions 仍待验证 |
+| 2026-11-28 | macOS，Python 3.14，Compose v5.7.1 | 非容器测试、停服后免传解密上限续作、对照 Compose 解析带引号、注释、export 和 CRLF 的数值 | 227 passed、1 skipped（Linux 内存限制）。UTF-8 下恢复控制器在 Bash 3.2 和 dash 各 26 passed。停服及续作使用桩命令 |
+| 2026-11-28 | macOS，0.4.0 推送前复查 | 非容器测试、真实 Nginx HTTP、UTF-8 下的恢复脚本、归档哈希期间并发列出和删除 | 211 passed、1 skipped（Linux 内存限制）；HTTP 6 passed；恢复控制器用例在 Bash 3.2 和 dash 下分别 16 passed |
+| 2026-11-28 | Chromium、Playwright WebKit 26 | 点击时发起剪贴板写入、延迟取得链接、手动复制回退、断网重连、登录跳转 | 两种引擎均通过。剪贴板写入使用测试替身，WebKit 登录跳转使用本地 HTTP 302 |
 | 2026-11-28 | macOS，Python 3.14，0.4.0 | 非容器测试、真实本机 Nginx HTTP、依赖与语法、Compose 配置 | 205 passed、1 skipped（Linux 内存限制）；HTTP 6 passed |
 | 2026-11-28 | Chromium 手机模拟与同源标签页 | 四种手机宽度、按需复制、并发改名、CSRF 续期和标签页刷新 | 通过 |
 | 2026-11-28 | 0.3.1 → 0.4.0 | 从旧提交生成加密归档，运行新版离线准备和存储启动 | 配置、两个版本、停用状态均保留，Token 已轮换 |

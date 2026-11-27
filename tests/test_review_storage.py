@@ -1,4 +1,8 @@
 import sqlite3
+import threading
+import hashlib
+import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 
@@ -127,12 +131,96 @@ def test_backup_quota_uses_actual_size_and_accounts_for_unregistered_files(clien
     assert create()['error_code'] == 'too_large'
 
 
-def test_verified_download_survives_delete(client, application, upload):
+def test_verified_download_survives_delete(client, application, upload, monkeypatch):
     upload()
     task = client.post('/api/backups', json={'password': PASSWORD}).json()['id']
     assert finish(client, task)['status'] == 'ready'
     backups = application.state.backups
-    with backups.download(task) as archive:
-        backups.delete(task)
-        assert archive.read(8) == b'MCMBAK01'
+    digest = hashlib.file_digest
+    hashing, resume = threading.Event(), threading.Event()
+
+    def paused_digest(file, algorithm):
+        hashing.set()
+        assert resume.wait(5)
+        return digest(file, algorithm)
+
+    def download_header():
+        with backups.download(task) as (archive, _):
+            return archive.read(8)
+
+    monkeypatch.setattr(hashlib, 'file_digest', paused_digest)
+    with ThreadPoolExecutor() as pool:
+        download = pool.submit(download_header)
+        try:
+            assert hashing.wait(2)
+            assert pool.submit(backups.list).result(timeout=2)['items'][0]['status'] == 'ready'
+            pool.submit(backups.delete, task).result(timeout=2)
+        finally:
+            resume.set()
+        assert download.result(timeout=2) == b'MCMBAK01'
     assert client.get(f'/api/backups/{task}/download').status_code == 404
+
+
+def test_verified_backup_get_head_and_ranges(client, application, upload):
+    upload()
+    ident = client.post('/api/backups', json={'password': PASSWORD}).json()['id']
+    job = finish(client, ident)
+    assert job['status'] == 'ready'
+    archive = (application.state.backups.root / (ident + '.mcmbackup')).read_bytes()
+    size = len(archive)
+    url = f'/api/backups/{ident}/download'
+    etag = '"' + job['sha256'] + '"'
+    for spec, start, end in [('0-99', 0, 99), ('100-', 100, size-1), ('-10', size-10, size-1),
+                             (f'10-{size+20}', 10, size-1)]:
+        part = client.get(url, headers={'Range': 'bytes=' + spec, 'If-Range': etag})
+        assert part.status_code == 206 and part.content == archive[start:end+1]
+        assert part.headers['content-range'] == f'bytes {start}-{end}/{size}'
+        assert int(part.headers['content-length']) == end-start+1
+        assert part.headers['etag'] == etag and part.headers['accept-ranges'] == 'bytes'
+    for headers in [{'Range': 'bytes=1-2', 'If-Range': '"other"'}, {'Range': 'bytes=0-2,6-10'}]:
+        full = client.get(url, headers=headers)
+        assert full.status_code == 200 and full.content == archive
+    for spec in [f'{size}-', '3-2', '-0']:
+        invalid = client.get(url, headers={'Range': 'bytes=' + spec})
+        assert invalid.status_code == 416 and invalid.headers['content-range'] == f'bytes */{size}'
+    head = client.head(url)
+    assert head.status_code == 200 and not head.content and int(head.headers['content-length']) == size
+    assert head.headers['etag'] == etag
+    part_head = client.head(url, headers={'Range': 'bytes=-10'})
+    assert part_head.status_code == 206 and part_head.headers['content-length'] == '10' and not part_head.content
+
+
+def test_concurrent_ranges_share_digest_and_recheck_modified_archive(client, application, upload, monkeypatch, tmp_path):
+    upload()
+    ident = client.post('/api/backups', json={'password': PASSWORD}).json()['id']
+    assert finish(client, ident)['status'] == 'ready'
+    path = application.state.backups.root / (ident + '.mcmbackup')
+    url = f'/api/backups/{ident}/download'
+    digest = hashlib.file_digest
+    calls = []
+    def count_digest(file, algorithm):
+        calls.append(os.fstat(file.fileno()).st_ino)
+        return digest(file, algorithm)
+    monkeypatch.setattr(hashlib, 'file_digest', count_digest)
+    start = threading.Barrier(9)
+    def request(index):
+        start.wait(timeout=5)
+        if index == 8:
+            return client.head(url).status_code
+        return client.get(url, headers={'Range': f'bytes={index}-{index}'}).status_code
+    with ThreadPoolExecutor(max_workers=9) as pool:
+        assert list(pool.map(request, range(9))) == [206] * 8 + [200]
+    assert len(calls) == 1
+
+    before = path.stat()
+    replacement = tmp_path / 'replacement.mcmbackup'
+    replacement.write_bytes(path.read_bytes())
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    replacement.replace(path)
+    assert client.head(url).status_code == 200 and len(calls) == 2
+    with path.open('r+b') as stream:
+        stream.write(b'X')
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert client.get(url, headers={'Range': 'bytes=1-10'}).status_code == 409
+    assert len(calls) == 3
+    assert client.get(f'/api/backups/{ident}').json()['error_code'] == 'archive_corrupt'

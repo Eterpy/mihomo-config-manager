@@ -32,8 +32,22 @@ def test_build_context_excludes_profiles_and_secrets():
     path = ROOT / ".dockerignore"
     if not path.exists():
         pytest.skip("build context rules are checked on host")
-    patterns = set(path.read_text().split())
-    assert {"**/*.yaml", "**/*.yml", "**/*.mcmbackup", "**/.env", "**/.env.*"} <= patterns
+    rules = [line for line in path.read_text().splitlines() if line and not line.startswith("#")]
+    from scripts.package_release import source_files
+    copy_sources = set()
+    copied = set()
+    for line in (ROOT / "Dockerfile").read_text().splitlines():
+        if line.startswith("COPY "):
+            for pattern in line.split()[1:-1]:
+                copy_sources.add("!" + pattern)
+                matches = list(ROOT.glob(pattern))
+                assert matches and all(path.is_file() for path in matches)
+                copied.update(matches)
+    allowed = set(source_files(ROOT))
+    expected = {path for path in allowed if path.relative_to(ROOT).parts[0] in {"app", "tests", "scripts"}}
+    assert copied == expected | {ROOT / name for name in ("requirements.txt", "requirements-dev.txt", "pyproject.toml")}
+    assert rules[0] == "**"
+    assert set(rules[1:]) == copy_sources | {"!Dockerfile"}
 
 
 def test_frontend_uses_text_nodes():

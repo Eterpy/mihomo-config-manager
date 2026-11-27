@@ -158,6 +158,11 @@ def test_live_history_and_backup_isolation(remote):
     assert row['status'] == 'ready'
     for candidate in [f'/backups/{ident}.mcmbackup', f'/api/backups/{ident}/download', f'/private/{item["id"]}/versions/1.yaml']:
         assert request_public(candidate)[0] == 404
-    assert remote.get(f'/api/backups/{ident}/download').content.startswith(b'MCMBAK01')
+    download = f'/api/backups/{ident}/download'
+    head = remote.head(download)
+    assert head.status_code == 200 and not head.content and int(head.headers['content-length']) == row['size']
+    part = remote.get(download, headers={'Range': 'bytes=0-7', 'If-Range': head.headers['etag']})
+    assert part.status_code == 206 and part.content == b'MCMBAK01'
+    assert remote.get(download).content.startswith(b'MCMBAK01')
     assert remote.delete('/api/backups/' + ident).status_code == 204
     assert remote.delete(base, params=revision(remote, base)).status_code == 204

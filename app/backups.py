@@ -1,6 +1,7 @@
 """Versioned authenticated archives. Never parse unauthenticated plaintext."""
 import concurrent.futures
 import errno
+from collections import defaultdict
 from contextlib import contextmanager
 import gzip
 import hashlib
@@ -124,6 +125,13 @@ def unpack_verified(archive, password, destination, limit=1024**3):
     """Destination must be a fresh private directory. No extractall, links or SQL execution."""
     destination = Path(destination)
     destination.mkdir(mode=0o700, parents=True, exist_ok=False)
+    return unpack_into_empty_directory(archive, password, destination, limit)
+
+
+def unpack_into_empty_directory(archive, password, destination, limit):
+    """Only use with a private directory exclusively created by this caller."""
+    if destination.is_symlink() or any(destination.iterdir()):
+        raise FileExistsError("restore destination occupied")
     with tempfile.TemporaryDirectory(dir=destination) as work:
         compressed = Path(work) / 'authenticated.tar.gz'
         decrypt(archive, compressed, password, limit)
@@ -195,6 +203,35 @@ def unpack_verified(archive, password, destination, limit=1024**3):
     return {'configs': len(configs), 'versions': len(versions), 'created_at': manifest['created_at']}
 
 
+def archive_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+class ArchiveVerification:
+    """Share a successful digest check among requests for the same opened file."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.verified = None
+
+    def matches(self, archive, expected):
+        with self.lock:
+            identity = archive_identity(os.fstat(archive.fileno()))
+            key = (identity, expected)
+            if self.verified == key:
+                return True
+            actual = hashlib.file_digest(archive, 'sha256').hexdigest()
+            after = os.fstat(archive.fileno())
+            if identity != archive_identity(after):
+                # Deleting an open archive changes ctime but leaves the descriptor usable.
+                if after.st_nlink:
+                    raise AppError(409, '备份归档在校验期间发生变化，请重新下载')
+                return actual == expected
+            if actual != expected:
+                return False
+            self.verified = key
+            return True
+
+
 class Backups:
     def __init__(self, store):
         self.store = store
@@ -208,6 +245,7 @@ class Backups:
         with store.db.connect() as con:
             con.execute("UPDATE backup_jobs SET status='failed',error_code='interrupted' WHERE status NOT IN ('ready','failed')")
         self.archive_lock = threading.RLock()
+        self.archive_checks = defaultdict(ArchiveVerification)
         for path in self.root.iterdir():
             if path.is_symlink():
                 path.unlink()
@@ -372,17 +410,20 @@ class Backups:
                 self.update(ident, 'failed', error_code='archive_corrupt')
                 raise AppError(409, '备份完整性校验失败')
             archive = os.fdopen(fd, 'rb')
-            try:
-                if hashlib.file_digest(archive, 'sha256').hexdigest() != row['sha256']:
-                    self.update(ident, 'failed', error_code='archive_corrupt')
-                    raise AppError(409, '备份完整性校验失败')
-                archive.seek(0)
-            except BaseException:
-                archive.close()
-                raise
-        # Serve this verified inode even if another admin deletes its directory entry.
+            check = self.archive_checks[ident]
+        # Verify and serve the open inode. Lists and deletions can proceed during hashing.
         with archive:
-            yield archive
+            if not check.matches(archive, row['sha256']):
+                with self.archive_lock:
+                    try:
+                        same_file = archive_identity(path.lstat()) == archive_identity(info)
+                    except FileNotFoundError:
+                        same_file = False
+                    if same_file:
+                        self.update(ident, 'failed', error_code='archive_corrupt')
+                raise AppError(409, '备份完整性校验失败')
+            archive.seek(0)
+            yield archive, row
 
     def delete(self, ident):
         with self.archive_lock, self.store.db.connect() as con:
@@ -401,3 +442,4 @@ class Backups:
             (self.root / (str(uuid.UUID(ident)) + '.mcmbackup')).unlink(missing_ok=True)
             sync_dir(self.root)
             con.execute('DELETE FROM backup_jobs WHERE id=?', (ident,))
+            self.archive_checks.pop(ident, None)

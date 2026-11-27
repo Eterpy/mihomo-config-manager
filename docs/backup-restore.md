@@ -45,7 +45,7 @@
 
 4. 「失败」通常是容量配额、磁盘空间不足或任务被重启中断，修正后重新创建即可。服务重启时，未完成的任务会被标记为失败并清理暂存文件，不会自动重试。
 
-列表会报告归档缺失或大小异常；下载前还会核对 SHA-256。未登记的普通归档保留并单列，管理员可按文件名核对后手动删除。
+列表会报告归档缺失或大小异常；下载前核对 SHA-256。同一份未改动的归档可以复用本进程的校验结果，首次并发续传只需完整读取一次。未登记的普通归档保留并单列，管理员可按文件名核对后手动删除。
 
 离线校验只解密和检查，不停止服务、不改动数据，适合在恢复前或定期确认备份可用：
 
@@ -60,13 +60,13 @@ sudo sh scripts/backup.sh verify /root/restore/备份ID.mcmbackup
 同机恢复和迁移都先逐项确认：
 
 - [ ] 在 SSH 等**交互终端**中用 `sudo` 执行。cron、管道和 `nohup` 都会被拒绝；备份密码只能在提示时隐藏输入，不能放在参数或环境变量中。
-- [ ] 部署目录已有填写完整的 `.env`。脚本会调用 `docker compose`，脚本在解密和停服前检查 Compose 配置、镜像及项目冲突。
+- [ ] 部署目录已有填写完整的 `.env`。脚本会调用 `docker compose`，脚本在解密和停服前通过管理镜像读取实际 Compose 环境，校验应用配置（`resume` 只在尚未停服、`data` 仍在原处时校验；之后的阶段若因配置无法启动 admin，修正 `.env` 后再次 `resume` 即可），并检查同名项目的已停止、运行中容器及其他运行中容器的端口和挂载。
 - [ ] 已构建当前代码对应的 admin 镜像：`sudo docker compose build admin`。恢复在该本地镜像中执行，不会从网络拉取。
-- [ ] 备份文件使用绝对路径，是普通文件而非符号链接，路径中没有逗号。建议放在部署目录之外，例如 `/root/restore/`。部署目录路径同样不能有逗号。
+- [ ] 备份文件使用绝对路径，是普通文件而非符号链接，路径中没有逗号。建议放在部署目录之外，例如 `/root/restore/`。部署目录路径同样不能有逗号。root 所有且权限为 0600 的归档可直接使用。脚本会创建一份 UID 10001 可读的临时密文副本，原件的权限和属主会保留。
 - [ ] 核对上次恢复留下的旧数据和可用空间。每次恢复单独保存旧目录；本次目标若已存在，脚本在停服前退出。0.3.x 的固定目录 `data.before-restore` 可与新目录共存。
 - [ ] 部署目录中没有 `.restore-state` 或 `.restore-work`；若有，说明上次恢复未完成，先按「中断、续作与故障对照」处理。
 - [ ] 磁盘剩余空间不少于备份文件大小加上解压后的数据量。
-- [ ] 恢复工具优先使用显式传入的 `BACKUP_MAX_MIB`，其次读取部署目录 `.env` 的纯数字设置，默认 1024。需要临时提高时，`verify` 和 `restore` 都加上同一上限，例如 `sudo BACKUP_MAX_MIB=2048 sh scripts/backup.sh restore ...`。
+- [ ] `verify` 和 `restore` 优先使用显式传入的 `BACKUP_MAX_MIB`，其次读取部署目录 `.env` 中的单行整数，默认 1024，范围为 1–102400 MiB。需要临时提高时，两条命令都加上同一上限，例如 `sudo BACKUP_MAX_MIB=2048 sh scripts/backup.sh restore ...`。中断后直接运行 `sudo sh scripts/backup.sh resume` 即可，已准备好的数据无需再次解密或传入上限。
 
 ## 同机恢复
 
@@ -84,7 +84,7 @@ sudo sh scripts/backup.sh restore /root/restore/备份ID.mcmbackup
 4. 安装恢复后的数据，校验它确实是本次准备的结果，再重设数据目录权限。
 5. 先启动 admin，健康后再启动 public。
 
-确认前取消或收到 INT、TERM、HUP 会清理解密暂存。确认后中断则保留恢复记录，使用 `resume` 续作。成功时提示「恢复完成」。之后按「恢复后检查清单」逐项完成。注意，原来位于 `data/backups` 的服务器端备份现在位于脚本输出的时间戳旧目录下的 `backups/`。
+确认前取消或收到 HUP、INT、QUIT、PIPE、TERM 时，控制器会先移除本次解密容器，再清理暂存。若无法移除容器或删除明文目录，按脚本提示人工处理。确认后中断则保留恢复记录，使用 `resume` 续作。成功时提示「恢复完成」。之后按「恢复后检查清单」逐项完成。注意，原来位于 `data/backups` 的服务器端备份现在位于脚本输出的时间戳旧目录下的 `backups/`。
 
 ## 迁移到新机器
 
@@ -175,7 +175,7 @@ sudo docker compose down
 sudo sh scripts/backup.sh resume
 ```
 
-续作从记录的阶段继续，启动前仍会完整校验数据；校验不通过时公开服务保持停止，旧数据不会被重新发布。不要手动删除或修改 `.restore-state`，也不要把旧 `data` 移回来启动容器。
+续作从记录的阶段继续。管理端首次启动前会完整校验安装数据；管理端已启动后，则核对本次安装标识并重新启动服务，保留已提交的管理操作。首次安装校验不通过时公开服务保持停止，旧数据不会被重新发布。不要手动删除或修改 `.restore-state`，也不要把旧 `data` 移回来启动容器。
 
 | 提示或现象 | 原因 | 处理 |
 |---|---|---|
@@ -221,6 +221,7 @@ sudo sh scripts/backup.sh resume
 | （不存在） | 尚未确认，现有数据未改动 | 无法续作 |
 | `prepared` | 已确认，旧数据尚未移动 | 停止服务，把 `data` 移到 `data.before-restore-<UTC时间戳>` |
 | `old_moved` | 旧数据已移走 | 把 `.restore-work/data` 移为 `data` |
-| `installed` | 新数据已就位 | 校验后启动 |
+| `installed` | 新数据已就位 | 核验准备指纹，启动 admin 并记录 `started` |
+| `started` | 本次安装已经验证，admin 已健康启动 | 核对安装标识，启动 admin 和 public，保留此后的配置修改 |
 
-新恢复记录带 `v2:` 前缀，控制文件 `.restore-work/old-dir` 记录 UTC 目录名。续作兼容旧版无前缀记录及其固定旧目录。每次启动前都会运行 `app.restore_guard`：确认 `data/.restore-proof` 与移动目录前固定在数据目录之外的 `.restore-work/expected-proof` 一致，并与数据库中的配置和 Token 指纹一致；没有未完成操作，发布目录只含已启用配置的新 Token 文件。另一轮恢复留下的旧目录即使带有自己的有效指纹也不能通过。不要删除、复制替换或手工伪造这些文件。校验通过后才重设权限并依次启动 admin 和 public，成功后删除 `.restore-state` 与 `.restore-work`。
+新恢复记录带 `v2:` 前缀，控制文件 `.restore-work/old-dir` 记录 UTC 目录名。续作兼容旧版无前缀记录及其固定旧目录。安装后首次启动前会运行 `app.restore_guard`：确认 `data/.restore-proof` 与移动目录前固定在数据目录之外的 `.restore-work/expected-proof` 一致，并与数据库中的配置和 Token 指纹一致；没有未完成操作，发布目录只含已启用配置的新 Token 文件。另一轮恢复留下的旧目录即使带有自己的有效指纹也不能通过。不要删除、复制替换或手工伪造这些文件。校验通过后才重设权限并依次启动 admin 和 public，public 启动失败时保留 `started` 记录和已运行的 admin；修复后执行 `resume`。成功后删除 `.restore-state` 与 `.restore-work`。

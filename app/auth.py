@@ -178,7 +178,13 @@ class SecurityBoundary:
             if not started:
                 if exc.status in (401, 503) and scope["method"] == "GET" and not scope["path"].startswith(("/api/", "/static/")) and scope["path"] != "/openapi.json" and "text/html" in request.headers.get("accept", ""):
                     title = "登录已过期或校验未通过" if exc.status == 401 else "认证服务暂不可用"
-                    response = HTMLResponse(f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>{title}</title><h1>{title}</h1><p><a href="/">重新加载</a></p><p><a href="/cdn-cgi/access/logout">退出后重新登录</a></p></html>', status_code=exc.status)
+                    response = HTMLResponse(
+                        '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
+                        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                        f'<title>{title}</title><h1>{title}</h1><p><a href="/">重新加载</a></p>'
+                        '<p><a href="/cdn-cgi/access/logout">退出后重新登录</a></p></html>',
+                        status_code=exc.status,
+                    )
                 else:
                     response = JSONResponse(exc.body, status_code=exc.status, headers={"Retry-After": "2"} if exc.status == 429 else None)
                 await response(scope, receive, safe_send)

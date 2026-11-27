@@ -36,7 +36,7 @@ chmod 600 .env
 | `HISTORY_VERSIONS` | `5`；当前版本以外的保留数量，范围 0–100 |
 | `YAML_TIMEOUT_SECONDS` | `5`；大于 0 且不超过 30 |
 | `YAML_MEMORY_MIB` | `256`；范围 64–1024，Linux 解析子进程使用 RLIMIT_AS |
-| `BACKUP_MAX_MIB` | `1024`；单次未压缩 tar 归档大小上限 |
+| `BACKUP_MAX_MIB` | 默认 `1024`，单次未压缩 tar 归档大小上限。离线校验和恢复接受单行整数，可加单引号、双引号、`export` 前缀或行尾注释，例如 `BACKUP_MAX_MIB=2048 # MiB`。 |
 | `BACKUP_QUOTA_MIB` | `2048`；在盘加密归档的实际字节总量上限，不小于单次上限；两者最大 102400 |
 | `DATA_DIR` | Compose 固定为 `/data`；直接运行时默认为工作目录下的 `data` |
 

@@ -25,5 +25,7 @@ else
     echo '缺少 ss，请先检查 18080/18081 的监听占用。' >&2
     exit 1
 fi
-test -d data/db && test -d data/private && test -d data/published
+for directory in data/db data/private data/published; do
+    [ -d "$directory" ] || { echo "缺少 ${directory}，请先运行 sudo sh scripts/init-data.sh" >&2; exit 1; }
+done
 echo '预检通过；尚未启动或修改任何服务。'

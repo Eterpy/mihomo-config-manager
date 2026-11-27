@@ -78,8 +78,11 @@ def test_successful_revocations_survive_restart(settings, tmp_path):
         recovered.close()
 
 
-@pytest.mark.parametrize("version,allowed", [("27.5.1", False), ("28.0.0", True), ("29.1.0", True), ("unknown", False)])
-def test_preflight_requires_safe_loopback_engine(tmp_path, version, allowed):
+@pytest.mark.parametrize("version,missing,allowed", [
+    ("27.5.1", None, False), ("28.0.0", None, True), ("29.1.0", None, True), ("unknown", None, False),
+    ("29.1.0", "db", False), ("29.1.0", "private", False), ("29.1.0", "published", False),
+])
+def test_preflight_requires_safe_loopback_engine(tmp_path, version, missing, allowed):
     original = Path(__file__).resolve().parents[1] / "scripts/preflight.sh"
     if not original.exists():
         pytest.skip("host deployment preflight tested outside container image")
@@ -90,14 +93,17 @@ def test_preflight_requires_safe_loopback_engine(tmp_path, version, allowed):
     (scripts / "check-compose-project.sh").write_bytes(original.with_name("check-compose-project.sh").read_bytes())
     (tmp_path / ".env").touch()
     for directory in ("db", "private", "published"):
-        (tmp_path / "data" / directory).mkdir(parents=True)
+        if directory != missing:
+            (tmp_path / "data" / directory).mkdir(parents=True)
     commands = tmp_path / "bin"
     commands.mkdir()
     docker = commands / "docker"
-    docker.write_text('#!/bin/sh\ncase "$1" in version) echo "$TEST_ENGINE_VERSION";; compose) echo "name: test";; esac\n')
+    docker.write_text('#!/bin/sh\ncase "$1" in version) echo "$TEST_ENGINE_VERSION";; esac\n')
     docker.chmod(0o755)
     ss = commands / "ss"
     ss.write_text("#!/bin/sh\nexit 0\n")
     ss.chmod(0o755)
     result = subprocess.run(["sh", str(script)], env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}", TEST_ENGINE_VERSION=version), capture_output=True)
     assert (result.returncode == 0) == allowed
+    if missing:
+        assert f"缺少 data/{missing}" in result.stderr.decode()

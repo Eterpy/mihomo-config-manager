@@ -46,3 +46,13 @@ jobs:
           persist-credentials: false
       - name: Run isolated container tests
         run: sh scripts/test-containers.sh
+      - name: Check production and test image contents
+        run: |
+          for file in app/notes.md app/links.json app/static/subscriptions.txt tests/links.json scripts/notes.txt; do
+            test ! -e "$file" && printf 'synthetic build fixture\n' > "$file"
+          done
+          for target in production test; do
+            image="config-manager-check-$target"
+            docker build --target "$target" -t "$image" .
+            python3 -m tests.image_contents "$target" "$image"
+          done

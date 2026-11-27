@@ -20,7 +20,7 @@
 
 - 上传请求体上限为 `MAX_UPLOAD_MIB` 加 64 KiB，其他请求为 64 KiB。
 - 同一时间只处理一个上传，并发上传返回 429，并带 `Retry-After: 2`。
-- 备份快照阶段的写请求返回 503。
+- 备份快照阶段的写请求返回 503。列表、详情、订阅链接、当前及历史预览可并发读取；如读取的文件恰被清理，预览返回 503。
 - 所有响应带 `Cache-Control: private, no-store` 和严格的 CSP；不提供 `/docs`、`/redoc` 交互文档。
 
 ## 管理端点
@@ -34,7 +34,7 @@
 | GET | `/api/configs/{id}` | — | 配置对象 |
 | POST | `/api/configs/{id}/subscription-link` | Origin 和 CSRF | `{"subscription_url": "..."}`；快照期间可读 |
 | GET | `/api/configs/{id}/preview` | — | 当前版本原始内容，`text/plain` |
-| PUT | `/api/configs/{id}/content` | multipart 只接受 `file`；必填查询参数 `expected_current_version` 为正整数 | 新版本的配置对象，沿用原订阅 URL；传入版本与当前版本不符时返回 409 |
+| PUT | `/api/configs/{id}/content` | multipart 只接受 `file`；必填查询参数 `expected_current_version` 为正整数 | 新版本的配置对象，沿用原订阅 URL；传入版本与当前版本不符时返回 409；内容相同且当前私有文件完整时，先检查并修复已启用的公开副本，再返回 409、`code=unchanged`，不生成新版本 |
 | PATCH | `/api/configs/{id}` | JSON：必填 `expected_updated_at`，仅提交有改动的 `name`、`description` | 配置对象 |
 | POST | `/api/configs/{id}/enable` | 查询参数 `expected_updated_at` | 配置对象 |
 | POST | `/api/configs/{id}/disable` | 查询参数 `expected_updated_at` | 配置对象 |
@@ -42,14 +42,18 @@
 | DELETE | `/api/configs/{id}` | 查询参数 `expected_updated_at` | 204，同时删除历史版本 |
 | GET | `/api/configs/{id}/versions` | — | 版本列表，新版本在前 |
 | GET | `/api/configs/{id}/versions/{version}/preview` | — | 该版本原始内容 |
-| POST | `/api/configs/{id}/versions/{version}/rollback` | JSON：`{"expected_current_version": 2}` | 配置对象；当前版本已变化或目标就是当前版本时返回 409 |
+| POST | `/api/configs/{id}/versions/{version}/rollback` | JSON：`{"expected_current_version": 2}` | 配置对象；当前版本已变化或目标就是当前版本时返回 409；目标版本内容与当前版本相同且当前私有文件完整时返回 409、`code=unchanged` |
 | GET | `/api/backups` | — | `items`、`used_bytes`、`quota_bytes`、`max_bytes` |
 | POST | `/api/backups` | JSON：`{"password": "16–256 个字符"}` | 202，备份任务对象 |
 | GET | `/api/backups/{id}` | — | 备份任务对象 |
-| GET | `/api/backups/{id}/download` | — | 加密备份文件；未完成、缺失或 SHA-256 不符时返回 409 |
+| GET / HEAD | `/api/backups/{id}/download` | 可选 `Range`、`If-Range` | 完整文件 200，单段范围 206，无法满足范围 416；HEAD 仅返回响应头。归档未完成、缺失或 SHA-256 不符时返回 409 |
 | DELETE | `/api/backups/{id}` | — | 204；任务进行中时返回 409 |
 
 配置和备份任务的 `{id}` 为 UUID。未登记归档使用列表给出的 `file-…` ID，仅供手动删除。`{version}` 为正整数。不要把真实备份密码写进 shell 历史或脚本。备份 ID 不是下载凭据，下载同样需要登录。
+
+备份下载支持 `bytes=start-end`、`bytes=start-` 和 `bytes=-suffix`。首次下载先校验完整归档。同一管理进程内，GET、HEAD 和并发分段请求共享成功的校验结果；文件被替换、大小或时间戳改变，或管理端重启后会重新计算 SHA-256。成功响应带 `Accept-Ranges: bytes` 和由 SHA-256 构成的强 ETag。206 返回所选区间的 `Content-Range` 与长度；416 返回 `Content-Range: bytes */总长度`。多段请求或 `If-Range` 不匹配时返回完整文件。
+
+上传或回滚的内容与数据库摘要相同，但当前私有文件缺失或损坏时，会从经校验的相同字节修复保留的版本并生成新版本。仍在磁盘上的损坏条目先移入隔离区供检查。
 
 ### 返回对象
 
@@ -69,7 +73,7 @@ API 错误返回 `detail`。文件名按解码后的字符数计，最长 255 �
 | 401 | 缺少或无效的 Access JWT |
 | 403 | Origin 或 CSRF 校验失败 |
 | 404 | 资源不存在 |
-| 409 | 名称冲突、版本已变化、任务状态不允许 |
+| 409 | 名称冲突、版本已变化（`code=stale`）、内容与当前版本相同（`code=unchanged`）、任务状态不允许 |
 | 413 | 超过大小限制 |
 | 422 | 参数或 YAML 校验失败 |
 | 428 | 缺少版本或修改时间前置条件 |

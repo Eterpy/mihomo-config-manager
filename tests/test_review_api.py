@@ -29,6 +29,7 @@ def test_navigation_and_api_expiry(client):
     headers = {'Cf-Access-Jwt-Assertion': '', 'Accept': 'text/html'}
     response = client.get('/', headers=headers)
     assert response.status_code == 401 and 'text/html' in response.headers['content-type']
+    assert 'name="viewport" content="width=device-width, initial-scale=1"' in response.text
     assert '/cdn-cgi/access/logout' in response.text and '<script' not in response.text
     assert client.get('/api/configs', headers=headers).headers['content-type'] == 'application/json'
 

@@ -37,6 +37,13 @@ def digest(path):
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
+def version_matches(path, row):
+    if path.parent.is_symlink() or path.parent.parent.is_symlink():
+        raise OSError("unsafe private version directory")
+    return (not path.is_symlink() and path.is_file()
+            and path.stat().st_size == row["size"] and digest(path) == row["sha256"])
+
+
 def sync_dir(path: Path):
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -124,7 +131,7 @@ class Store:
         return row
 
     def subscription_url(self, config_id):
-        with self.lock, self.db.connect() as con:
+        with self.db.connect() as con:
             token = self._row(con, config_id)["token"]
             return f"{self.settings.public_base_url}/s/{token}/profile.yaml"
 
@@ -133,20 +140,29 @@ class Store:
             raise AppError(409, "配置已在其他页面修改，请刷新后重试", code="stale", current=self._view(row))
 
     def list(self):
-        with self.lock, self.db.connect() as con:
+        with self.db.connect() as con:
             return [self._view(r) for r in con.execute("SELECT * FROM configs ORDER BY created_at DESC, id")]
 
     def get(self, config_id):
-        with self.lock, self.db.connect() as con:
+        with self.db.connect() as con:
             return self._view(self._row(con, config_id))
 
     def preview(self, config_id):
-        with self.lock, self.db.connect() as con:
-            row = self._row(con, config_id)
-            try:
-                return self._version_path(config_id, row["version"]).read_bytes()
-            except OSError:
-                raise AppError(503, "私有文件不可用，请检查存储") from None
+        row = self.get(config_id)
+        return self._read_version(config_id, row)
+
+    def _read_version(self, config_id, row):
+        path = self._version_path(config_id, row["version"])
+        try:
+            if path.is_symlink() or path.parent.is_symlink() or path.parent.parent.is_symlink() or not path.is_file():
+                raise OSError()
+            with path.open("rb") as stream:
+                content = stream.read(row["size"] + 1)
+            if len(content) != row["size"] or hashlib.sha256(content).hexdigest() != row["sha256"]:
+                raise OSError()
+            return content
+        except OSError:
+            raise AppError(503, "版本文件不可用或完整性检查失败") from None
 
     def _writable(self):
         if self.failed or not self.ready:
@@ -175,12 +191,12 @@ class Store:
 
     def _publish(self, row):
         source = self._version_path(row["id"], row["version"])
-        if source.is_symlink() or digest(source) != row["sha256"]:
+        if not version_matches(source, row):
             raise OSError("private version integrity failure")
         destination = self._token_path(row["token"])
         if destination.is_symlink() or not destination.exists() or digest(destination) != row["sha256"]:
             atomic_copy(source, destination, 0o644)
-        else:
+        elif (destination.stat().st_mode & 0o7777) != 0o644:
             os.chmod(destination, 0o644)
 
     def _withdraw(self, token):
@@ -223,11 +239,63 @@ class Store:
                 file.unlink()
         sync_dir(directory)
 
+    def _inspect_recovery(self, con):
+        """Read all evidence before replaying any operation or removing files."""
+        mismatch = "数据库可能比磁盘上的配置旧，或版本与发布凭据不一致。已停止启动，请从加密备份恢复或人工核查。"
+        invalid = con.execute("""
+            SELECT 1 FROM configs c
+            LEFT JOIN versions v ON v.config_id = c.id AND v.version = c.version
+            WHERE v.version IS NULL OR v.size != c.size OR v.sha256 != c.sha256
+               OR EXISTS (SELECT 1 FROM versions n WHERE n.config_id = c.id AND n.version > c.version)
+            LIMIT 1
+        """).fetchone()
+        if invalid:
+            raise MissingDatabase(mismatch)
+        known = {row[0] for row in con.execute("SELECT token FROM configs UNION SELECT old_token FROM operations")}
+        for path in self.published.iterdir():
+            if path.suffix == ".yaml" and TOKEN.fullmatch(path.stem) and path.stem not in known:
+                raise MissingDatabase(mismatch)
+        uncommitted = []
+        for row in con.execute("SELECT id, version, status FROM configs"):
+            directory = self._version_path(row["id"], row["version"]).parent
+            if directory.is_symlink() or directory.parent.is_symlink():
+                raise MissingDatabase(mismatch)
+            if row["status"] == "deleting" and not directory.exists():
+                continue
+            if not directory.is_dir():
+                raise MissingDatabase(mismatch)
+            for path in directory.iterdir():
+                if path.suffix == ".yaml" and re.fullmatch(r"[0-9]+", path.stem):
+                    version = int(path.stem)
+                    if version > row["version"]:
+                        if path.name != f'{row["version"] + 1}.yaml':
+                            raise MissingDatabase(mismatch)
+                        uncommitted.append(path)
+        return uncommitted
+
+    def _quarantine(self, path):
+        quarantine = self.root / "quarantine"
+        if quarantine.is_symlink():
+            raise RuntimeError("隔离目录异常")
+        quarantine.mkdir(mode=0o700, exist_ok=True)
+        dest = Path(tempfile.mkdtemp(prefix=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-"), dir=quarantine))
+        target = dest / path.relative_to(self.private)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.rename(target)
+        for directory in target.parents:
+            sync_dir(directory)
+            if directory == self.root:
+                break
+        sync_dir(path.parent)
+
     def recover(self):
         with self.lock:
             self.ready = False
             with self.db.connect() as con:
+                uncommitted = self._inspect_recovery(con)
                 ids = [r[0] for r in con.execute("SELECT config_id FROM operations")]
+            for path in uncommitted:
+                self._quarantine(path)
             for config_id in ids:
                 self._finish(config_id)
             with self.db.connect() as con:
@@ -243,25 +311,17 @@ class Store:
                     self._publish(row)
                 else:
                     source = self._version_path(row["id"], row["version"])
-                    if source.is_symlink() or digest(source) != row["sha256"]:
+                    if not version_matches(source, row):
                         raise OSError("private version integrity failure")
                 self._prune(row["id"])
             known = {r["id"] for r in rows}
-            isolated = 0
+            isolated = len(uncommitted)
             for directory in self.private.iterdir():
                 if directory.name == ".incoming":
                     for file in directory.iterdir():
                         file.unlink()
                 elif directory.name not in known:
-                    quarantine = self.root / "quarantine"
-                    if quarantine.is_symlink():
-                        raise RuntimeError("隔离目录异常")
-                    quarantine.mkdir(mode=0o700, exist_ok=True)
-                    dest = tempfile.mkdtemp(prefix=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-"), dir=quarantine)
-                    directory.rename(Path(dest) / directory.name)
-                    sync_dir(Path(dest))
-                    sync_dir(quarantine)
-                    sync_dir(self.private)
+                    self._quarantine(directory)
                     sync_dir(self.root)
                     isolated += 1
             if isolated:
@@ -306,9 +366,21 @@ class Store:
                     row = self._row(con, config_id)
                     if expected_current_version is not None:
                         self.check_revision(row, "version", expected_current_version)
+                    sha = digest(source)
+                    if sha == row["sha256"]:
+                        current_path = self._version_path(config_id, row["version"])
+                        if version_matches(current_path, row):
+                            message = "文件内容相同，未生成新版本" if source_version is None else "所选版本与当前版本内容相同，无需回滚"
+                            if row["enabled"]:
+                                self._publish(row)
+                            raise AppError(409, message, code="unchanged", current=self._view(row))
+                        # Restore the retained history entry as well as creating the new current version.
+                        if current_path.exists() or current_path.is_symlink():
+                            self._quarantine(current_path)
+                        self._store_version(source, config_id, row["version"])
                     version, stamp = row["version"] + 1, next_update(row["updated_at"])
                     self._store_version(source, config_id, version)
-                    size, sha = source.stat().st_size, digest(source)
+                    size = source.stat().st_size
                     con.execute("INSERT INTO versions (config_id,version,filename,size,sha256,created_at,source_version) VALUES (?, ?, ?, ?, ?, ?, ?)", (config_id, version, filename, size, sha, stamp, source_version))
                     con.execute("UPDATE configs SET filename=?, size=?, sha256=?, version=?, updated_at=?, status='pending' WHERE id=?", (filename, size, sha, version, stamp, config_id))
                     con.execute("INSERT INTO operations VALUES (?, NULL)", (config_id,))
@@ -354,7 +426,8 @@ class Store:
             return self.get(config_id)
 
     def versions(self, config_id):
-        with self.lock, self.db.connect() as con:
+        with self.db.connect() as con:
+            con.execute("BEGIN")
             current = self._row(con, config_id)
             return [dict(r) | {"is_current": r["version"] == current["version"]} for r in con.execute("SELECT * FROM versions WHERE config_id=? ORDER BY version DESC", (config_id,))]
 
@@ -366,16 +439,18 @@ class Store:
                 raise AppError(404, "版本不存在或已清理")
             path = self._version_path(config_id, version)
             try:
-                if any(p.is_symlink() for p in (path, path.parent, path.parent.parent)) or path.stat().st_size != row["size"] or digest(path) != row["sha256"]:
+                if not version_matches(path, row):
                     raise OSError()
                 return path, dict(row)
             except OSError:
                 raise AppError(503, "历史文件完整性检查失败") from None
 
     def version_preview(self, config_id, version):
-        with self.lock:
-            path, _ = self.historical(config_id, version)
-            return path.read_bytes()
+        with self.db.connect() as con:
+            row = con.execute("SELECT version,size,sha256 FROM versions WHERE config_id=? AND version=?", (config_id, version)).fetchone()
+        if row is None:
+            raise AppError(404, "版本不存在或已清理")
+        return self._read_version(config_id, row)
 
     def rollback(self, config_id, version, expected):
         with self.lock:

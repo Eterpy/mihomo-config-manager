@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import tempfile
 from email.message import Message
 from email.utils import collapse_rfc2231_value
@@ -25,6 +26,34 @@ from .settings import Settings
 from .validation import check_filename_chars, filename_valid, validate_yaml
 
 BASE = Path(__file__).parent
+
+
+def archive_range(header, size):
+    """Return a single inclusive byte range, or None for an unsupported range unit or multiple ranges."""
+    if not header.startswith("bytes=") or "," in header:
+        return None
+    match = re.fullmatch(r"bytes=([0-9]*)-([0-9]*)", header)
+    if not match or not any(match.groups()):
+        raise ValueError("invalid range")
+    first, last = match.groups()
+    if not first:
+        start, end = max(0, size - int(last)), size - 1
+    else:
+        start = int(first)
+        end = min(int(last), size - 1) if last else size - 1
+    if start > end:
+        raise ValueError("unsatisfiable range")
+    return start, end
+
+
+def archive_chunks(archive, start, length):
+    archive.seek(start)
+    while length > 0:
+        chunk = archive.read(min(65536, length))
+        if not chunk:
+            raise OSError("verified archive truncated")
+        yield chunk
+        length -= len(chunk)
 
 
 class Rollback(BaseModel):
@@ -247,11 +276,29 @@ def create_app(settings=None, verifier=None):
             yield archive
 
     @app.get("/api/backups/{backup_id}/download")
-    async def backup_download(backup_id: UUID, archive=Depends(verified_archive)):
+    @app.head("/api/backups/{backup_id}/download")
+    async def backup_download(backup_id: UUID, request: Request, verified=Depends(verified_archive)):
+        archive, row = verified
+        size = row["size"]
+        etag = f'"{row["sha256"]}"'
         headers = {"Content-Disposition": f'attachment; filename="{backup_id}.mcmbackup"',
-                   "Content-Length": str(os.fstat(archive.fileno()).st_size)}
-        return StreamingResponse(iter(lambda: archive.read(65536), b""), headers=headers,
-                                 media_type="application/octet-stream")
+                   "Accept-Ranges": "bytes", "ETag": etag, "Content-Type": "application/octet-stream"}
+        selected = None
+        if request.headers.get("if-range", etag) == etag:
+            try:
+                selected = archive_range(request.headers.get("range", ""), size)
+            except ValueError:
+                headers["Content-Range"] = f"bytes */{size}"
+                return Response(status_code=416, headers=headers)
+        start, end = selected if selected is not None else (0, size - 1)
+        status = 206 if selected is not None else 200
+        if selected is not None:
+            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        length = end - start + 1
+        headers["Content-Length"] = str(length)
+        if request.method == "HEAD":
+            return Response(status_code=status, headers=headers)
+        return StreamingResponse(archive_chunks(archive, start, length), status_code=status, headers=headers)
 
     @app.delete("/api/backups/{backup_id}", status_code=204)
     async def backup_delete(backup_id: str):

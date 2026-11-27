@@ -23,13 +23,28 @@ work="$project_dir/.restore-work"
 journal_prefix=v2:
 old_dir=
 owns_work=false
+worker_id=
+services_ready=false
+completed=false
 cleanup() {
     result=$?
-    trap - EXIT HUP INT TERM
-    if [ "$owns_work" = true ] && [ ! -e .restore-state ]; then
-        rm -rf "$work"
-        rm -f .restore-state.tmp
-        [ "$result" -eq 0 ] || echo '准备未完成，已清理解密暂存，现有数据未改动。' >&2
+    trap - EXIT
+    trap '' HUP INT QUIT PIPE TERM
+    if [ "$completed" = false ] && [ "$result" -eq 0 ]; then result=1; fi
+    if [ -n "$worker_id" ] && ! docker rm -f "$worker_id" >/dev/null; then
+        echo "未能停止恢复容器 $worker_id。请先移除该容器，再手动清理 .restore-work（可能含明文）。" >&2
+        exit 1
+    fi
+    if [ "$services_ready" = true ] && [ "$result" -ne 0 ]; then
+        echo '恢复服务已启动，请检查恢复记录和暂存目录的清理状态。' >&2
+    elif [ "$owns_work" = true ] && [ -d "$work" ] && [ ! -e .restore-state ]; then
+        if ! rm -rf "$work" && ! rm -rf "$work"; then
+            echo '请手动清理 .restore-work，其中可能含已解密的数据。' >&2
+            result=1
+        elif [ "$result" -ne 0 ]; then
+            echo '准备未完成，已清理解密暂存，现有数据未改动。' >&2
+        fi
+        rm -f .restore-state.tmp || result=1
     elif [ "$result" -ne 0 ] && [ -e .restore-state ]; then
         echo '恢复已中断；请检查状态后运行 sudo sh scripts/backup.sh resume。' >&2
     fi
@@ -38,23 +53,55 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
+trap 'exit 131' QUIT
+trap 'exit 141' PIPE
 trap 'exit 143' TERM
 if [ "$action" = resume ] && [ ! -f .restore-state ]; then
     echo '没有可续作的恢复记录。若仅有 .restore-work，请核实后移走确认前的暂存数据。' >&2
     exit 1
 fi
+validate_settings() {
+    # Read the real Compose environment with the admin image. Only called while
+    # ./data is still in place, before this run stops services or moves data.
+    if ! docker compose run --rm --no-deps --pull never -T --entrypoint python admin -c 'from app.settings import Settings; Settings.from_env()'; then
+        echo '部署配置或管理镜像无效，请核对 .env 和镜像；本次检查尚未停服。' >&2
+        exit 1
+    fi
+}
 if [ "$action" != verify ]; then
     [ -f .env ] || { echo '缺少部署文件 .env。' >&2; exit 1; }
     docker compose config --quiet
     sh scripts/check-compose-project.sh
+    docker image inspect "$image" >/dev/null || { echo '缺少本地管理镜像，请先运行 docker compose build admin。' >&2; exit 1; }
+    # Without ./data no service can be running, so there is no downtime to avoid.
+    if [ "$action" = restore ] && [ -d data ]; then validate_settings; fi
 fi
-max_mib=${BACKUP_MAX_MIB:-}
-if [ -z "$max_mib" ] && [ -f .env ]; then
-    max_mib=$(sed -n 's/^BACKUP_MAX_MIB=\([0-9][0-9]*\)$/\1/p' .env | tail -n 1)
-fi
-max_mib=${max_mib:-1024}
-case "$max_mib" in *[!0-9]*) echo 'BACKUP_MAX_MIB 必须为正整数。' >&2; exit 1;; esac
 if [ "$action" != resume ]; then
+    max_mib=1024
+    if [ -n "${BACKUP_MAX_MIB:-}" ]; then
+        max_mib=$BACKUP_MAX_MIB
+    elif [ -f .env ]; then
+        # Parse a numeric literal only. Never source the deployment environment.
+        max_mib=$(awk '
+            BEGIN { limit = 1024 }
+            /^[[:blank:]]*(export[[:blank:]]+)?BACKUP_MAX_MIB[[:blank:]]*=/ {
+                sub(/^[^=]*=[[:blank:]]*/, "")
+                sub(/\r$/, "")
+                if ($0 ~ /^("[0-9]+"|\047[0-9]+\047)[[:blank:]]*(#.*)?$/ ||
+                    $0 ~ /^[0-9]+([[:blank:]]+#.*)?[[:blank:]]*$/) {
+                    match($0, /[0-9]+/)
+                    limit = substr($0, RSTART, RLENGTH)
+                } else {
+                    limit = "invalid"
+                }
+            }
+            END { print limit }
+        ' .env)
+    fi
+    case "$max_mib" in *[!0-9]*) echo 'BACKUP_MAX_MIB 必须是 1–102400 的整数。' >&2; exit 1;; esac
+    if ! [ "$max_mib" -ge 1 ] 2>/dev/null || ! [ "$max_mib" -le 102400 ] 2>/dev/null; then
+        echo 'BACKUP_MAX_MIB 必须是 1–102400 的整数。' >&2; exit 1
+    fi
     [ ! -e .restore-state ] && [ ! -e "$work" ] || { echo '存在恢复记录，请先检查并使用 resume；不要覆盖暂存数据。' >&2; exit 1; }
     case "$archive" in /*) ;; *) echo '归档必须使用绝对路径。' >&2; exit 1;; esac
     case "$archive" in *,*) echo '归档路径不能包含逗号。' >&2; exit 1;; esac
@@ -63,16 +110,27 @@ if [ "$action" != resume ]; then
     if [ "$action" = restore ] && { [ -e "$old_dir" ] || [ -L "$old_dir" ]; }; then
         echo '本次旧数据目录已存在，请稍后重试。' >&2; exit 1
     fi
-    docker image inspect "$image" >/dev/null || { echo '缺少本地管理镜像，请先运行 docker compose build admin。' >&2; exit 1; }
+    if [ "$action" = verify ]; then
+        docker image inspect "$image" >/dev/null || { echo '缺少本地管理镜像，请先运行 docker compose build admin。' >&2; exit 1; }
+    fi
     mkdir -m 700 "$work"
     owns_work=true
-    chown 10001:10001 "$work"
+    # Never change the original archive's owner or permissions.
+    cp "$archive" "$work/archive.mcmbackup"
+    chmod 600 "$work/archive.mcmbackup"
+    chown 10001:10001 "$work/archive.mcmbackup" "$work"
     command=verify
     [ "$action" != restore ] || command=prepare
-    if ! docker run --rm -it --network none --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --memory 512m --pids-limit 32 --tmpfs /tmp:rw,noexec,nosuid,size=32m --mount "type=bind,src=$archive,dst=/archive,readonly" --mount "type=bind,src=$work,dst=/work" "$image" python -m app.backup_cli "$command" /archive /work/data --max-mib "$max_mib"; then
-        exit 1
-    fi
-    if [ "$action" = verify ]; then exit 0; fi
+    worker_id=$(docker create -it --network none --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --memory 512m --pids-limit 32 --tmpfs /tmp:rw,noexec,nosuid,size=32m --mount "type=bind,src=$work/archive.mcmbackup,dst=/archive,readonly" --mount "type=bind,src=$work,dst=/work" "$image" python -m app.backup_cli "$command" /archive /work/data --max-mib "$max_mib")
+    # Capture the daemon-issued ID before attachment so cleanup can stop a detached worker.
+    [ -n "$worker_id" ] || { echo '无法确定恢复容器 ID。' >&2; exit 1; }
+    docker start -ai "$worker_id"
+    [ "$(docker inspect --format '{{.State.Status}}:{{.State.ExitCode}}' "$worker_id")" = exited:0 ] ||
+        { echo '解密容器未正常完成。' >&2; exit 1; }
+    docker rm "$worker_id" >/dev/null
+    worker_id=
+    rm -f "$work/archive.mcmbackup"
+    if [ "$action" = verify ]; then completed=true; exit 0; fi
     printf '%s\n' "$old_dir" > "$work/old-dir"
     # Bind the journal to this preparation, outside the data directory that
     # will be installed. Never regenerate this reference during resume.
@@ -89,9 +147,6 @@ if [ "$action" != resume ]; then
     sync
 fi
 [ -f .restore-state ] || exit 1
-if [ "$action" = resume ]; then
-    docker image inspect "$image" >/dev/null || { echo '缺少本地管理镜像，请先运行 docker compose build admin。' >&2; exit 1; }
-fi
 state=$(cat .restore-state)
 case "$state" in
     v2:*)
@@ -105,9 +160,12 @@ esac
 if [ "$state" = prepared ] && [ -e data ] && [ -e "$old_dir" ]; then
     echo '旧数据目录已存在，请先核实并妥善移走。' >&2; exit 1
 fi
-case "$state" in prepared|old_moved|installed) ;; *) echo '恢复记录无效，停止。' >&2; exit 1;; esac
+case "$state" in prepared|old_moved|installed|started) ;; *) echo '恢复记录无效，停止。' >&2; exit 1;; esac
+# Later states run after services stopped and data moved; admin startup reports
+# configuration errors there, and resume can be retried after fixing .env.
+if [ "$action" = resume ] && [ "$state" = prepared ] && [ -d data ]; then validate_settings; fi
 if [ "$action" = restore ]; then sh scripts/check-compose-project.sh; fi
-docker compose down
+if [ "$state" != started ]; then docker compose down; fi
 if [ "$state" = prepared ]; then
     if [ ! -d data ] && [ -d "$old_dir" ] && [ -d "$work/data" ]; then
         journal old_moved; sync; state=old_moved
@@ -143,19 +201,34 @@ if [ "$state" = old_moved ]; then
     journal installed
     sync
 fi
-# Never infer that an existing data directory belongs to this restore.
-# A stale journal or a manually moved old directory must not revive old tokens.
-if ! docker run --rm --network none --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --memory 512m --pids-limit 32 --mount "type=bind,src=$project_dir/data,dst=/data,readonly" --mount "type=bind,src=$work,dst=/restore-control,readonly" "$image" python -m app.restore_guard /data /restore-control/expected-proof; then
-    echo '恢复数据与准备阶段不匹配，禁止启动订阅服务。' >&2
+if [ "$state" = started ]; then
+    # The live database can legitimately change after admin starts. Bind resume to
+    # the original installation, without comparing its mutable token fingerprint.
+    [ -f data/.restore-proof ] && [ ! -L data/.restore-proof ] && [ -f "$work/expected-proof" ] &&
+        cmp -s data/.restore-proof "$work/expected-proof" || { echo '恢复安装标识不匹配。' >&2; exit 1; }
+    docker compose up -d --wait admin
+else
+    # Never infer that an existing data directory belongs to this restore.
+    # A stale journal or a manually moved old directory must not revive old tokens.
+    if ! docker run --rm --network none --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --memory 512m --pids-limit 32 --mount "type=bind,src=$project_dir/data,dst=/data,readonly" --mount "type=bind,src=$work,dst=/restore-control,readonly" "$image" python -m app.restore_guard /data /restore-control/expected-proof; then
+        echo '恢复数据与准备阶段不匹配，禁止启动订阅服务。' >&2
+        exit 1
+    fi
+    sh scripts/init-data.sh
+    if ! docker compose up -d --wait admin; then
+        docker compose stop admin public
+        echo '管理端恢复失败，公开服务保持停止。修复后运行 resume。' >&2
+        exit 1
+    fi
+    journal started
+fi
+if ! docker compose up -d --wait public; then
+    docker compose stop public
+    echo '公开服务启动失败，数据已安装，管理端修改会保留；修复后运行 resume。' >&2
     exit 1
 fi
-sh scripts/init-data.sh
-if ! docker compose up -d --wait admin; then
-    docker compose stop admin public
-    echo '管理端恢复失败，公开服务保持停止。修复后运行 resume。' >&2
-    exit 1
-fi
-if ! docker compose up -d --wait public; then docker compose stop public; exit 1; fi
+services_ready=true
 rm -f .restore-state
 rm -rf "$work"
-echo "恢复完成。请在管理页复制新订阅链接；旧数据保留在 $old_dir。"
+echo "恢复完成。请在管理页复制新订阅链接；旧数据保留在 ${old_dir}。"
+completed=true

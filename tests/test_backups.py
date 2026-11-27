@@ -181,3 +181,27 @@ def test_schema_one_migration(settings, tmp_path):
         with store.db.connect() as con:
             assert con.execute('PRAGMA user_version').fetchone()[0] == 2
     finally: store.close()
+
+
+def test_reads_complete_while_snapshot_copy_is_paused(upload, client, monkeypatch):
+    import threading
+    import app.backups as module
+    item = upload().json()
+    base = '/api/configs/' + item['id']
+    copying, proceed = threading.Event(), threading.Event()
+    copy = module.atomic_copy
+    def paused_copy(*args):
+        copying.set()
+        assert proceed.wait(5)
+        return copy(*args)
+    monkeypatch.setattr(module, 'atomic_copy', paused_copy)
+    ident = client.post('/api/backups', json={'password': PASSWORD}).json()['id']
+    try:
+        assert copying.wait(5)
+        assert client.get('/api/status').json()['snapshotting']
+        for path in ['/api/configs', base, base + '/versions', base + '/preview', base + '/versions/1/preview']:
+            assert client.get(path).status_code == 200
+        assert client.post(base + '/subscription-link').status_code == 200
+    finally:
+        proceed.set()
+    assert finish(client, ident)['status'] == 'ready'

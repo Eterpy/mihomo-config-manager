@@ -691,4 +691,4 @@ dialog::backdrop {
   }
 }
 
-.backup-section{max-width:1200px;margin:2rem auto;padding:1rem}.history-row{padding:1rem 0;border-bottom:1px solid #8885;overflow-wrap:anywhere;white-space:pre-wrap}.history-row button,.history-row a{margin-right:1rem}
+.backup-section{max-width:1200px;margin:2rem auto;padding:1rem}.history-row{padding:1rem 0;border-bottom:1px solid #8885;overflow-wrap:anywhere;white-space:pre-wrap}.history-row button,.history-row a{margin-right:1rem}.history-note{color:var(--muted);font-size:12px}
