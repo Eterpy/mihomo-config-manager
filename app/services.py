@@ -254,12 +254,14 @@ class Store:
             self._complete(config_id)
             return self.get(config_id)
 
-    def replace(self, config_id, source: Path, filename: str, source_version=None):
+    def replace(self, config_id, source: Path, filename: str, source_version=None, *, expected_current_version=None):
         with self.lock:
             self._writable()
             try:
                 with self.db.connect() as con:
                     row = self._row(con, config_id)
+                    if expected_current_version is not None and row["version"] != expected_current_version:
+                        raise AppError(409, "当前版本已变化，请重新选择文件并确认要更新的版本")
                     version, stamp = row["version"] + 1, now()
                     self._store_version(source, config_id, version)
                     size, sha = source.stat().st_size, digest(source)

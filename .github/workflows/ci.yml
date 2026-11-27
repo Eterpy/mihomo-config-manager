@@ -36,7 +36,7 @@ jobs:
           node --check app/static/app.js
           for script in scripts/*.sh; do sh -n "$script"; done
       - name: Build source archive
-        run: python scripts/package_release.py "$RUNNER_TEMP/mihomo-config-manager-source.tar.gz"
+        run: python scripts/package_release.py "$RUNNER_TEMP/yaml-config-manager-source.tar.gz"
   containers:
     runs-on: ubuntu-latest
     timeout-minutes: 25

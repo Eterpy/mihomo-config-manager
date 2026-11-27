@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -77,7 +77,7 @@ def create_app(settings=None, verifier=None):
             await asyncio.to_thread(app.state.backups.close)
             await asyncio.to_thread(app.state.store.close)
 
-    app = FastAPI(title="Mihomo Config Manager", version="0.3.1", lifespan=lifespan, docs_url=None, redoc_url=None,
+    app = FastAPI(title="YAML Config Manager", version="0.3.1", lifespan=lifespan, docs_url=None, redoc_url=None,
                   telemetry={"auto_configure": False, "tracing": False, "metrics": False, "logs": False, "operation_spans": False})
     app.state.settings = settings
     app.state.csrf = csrf
@@ -120,7 +120,7 @@ def create_app(settings=None, verifier=None):
     async def configs():
         return await asyncio.to_thread(app.state.store.list)
 
-    async def upload(request, config_id=None):
+    async def upload(request, config_id=None, expected_current_version=None):
         async with request.form(max_files=1, max_fields=2, max_part_size=65536) as form:
             if len(form.getlist("file")) != 1 or not isinstance(form.get("file"), UploadFile) or any(k not in {"file", "name", "description"} for k in form):
                 raise AppError(422, "请提交一个名为 file 的 YAML 文件")
@@ -156,7 +156,7 @@ def create_app(settings=None, verifier=None):
                         output.write(chunk)
                 await asyncio.to_thread(validate_yaml, path, settings)
                 if config_id:
-                    return await asyncio.to_thread(store.replace, str(config_id), path, filename)
+                    return await asyncio.to_thread(store.replace, str(config_id), path, filename, expected_current_version=expected_current_version)
                 return await asyncio.to_thread(store.create, path, filename, name, description)
             finally:
                 path.unlink(missing_ok=True)
@@ -175,8 +175,8 @@ def create_app(settings=None, verifier=None):
         return Response(data, media_type="text/plain; charset=utf-8")
 
     @app.put("/api/configs/{config_id}/content", response_model=ConfigView, openapi_extra={"requestBody": {"required": True, "content": {"multipart/form-data": {"schema": {"type": "object", "required": ["file"], "properties": {"file": {"type": "string", "format": "binary"}}}}}}})
-    async def replace(config_id: UUID, request: Request):
-        return await upload(request, config_id)
+    async def replace(config_id: UUID, request: Request, expected_current_version: int | None = Query(default=None, gt=0)):
+        return await upload(request, config_id, expected_current_version)
 
     @app.patch("/api/configs/{config_id}", response_model=ConfigView)
     async def rename(config_id: UUID, values: Rename):

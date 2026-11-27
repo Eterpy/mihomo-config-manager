@@ -1,6 +1,6 @@
 # 备份与恢复
 
-[返回 README](../README.md)。本文是备份、恢复与迁移的完整说明。命令在部署目录（下文以 `/opt/mihomo-config-manager` 为例）执行；恢复需要 root 和交互终端。
+[返回 README](../README.md)。本文是备份、恢复与迁移的完整说明。命令在部署目录（下文以 `/opt/yaml-config-manager` 为例）执行；恢复需要 root 和交互终端。
 
 ## 机制概览
 
@@ -69,7 +69,7 @@ sudo sh scripts/backup.sh verify /root/restore/备份ID.mcmbackup
 ## 同机恢复
 
 ```sh
-cd /opt/mihomo-config-manager
+cd /opt/yaml-config-manager
 sudo sh scripts/backup.sh verify /root/restore/备份ID.mcmbackup
 sudo sh scripts/backup.sh restore /root/restore/备份ID.mcmbackup
 ```
@@ -92,11 +92,11 @@ sudo sh scripts/backup.sh restore /root/restore/备份ID.mcmbackup
 
 ### 2. 新机器：准备环境
 
-按 [部署指南](deployment.md) 完成到「测试与启动」，使用与旧机器相同版本的代码，**先正常启动服务，但不要上传配置**：
+按 [部署指南](deployment.md) 完成到「测试与启动」，使用与旧机器相同版本的代码。先把仓库页面上的克隆地址赋给 shell 变量 `REPO_URL`，然后启动一个空配置库：
 
 ```sh
-git clone https://github.com/Eterpy/mihomo-config-manager.git /opt/mihomo-config-manager
-cd /opt/mihomo-config-manager
+git clone "$REPO_URL" /opt/yaml-config-manager
+cd /opt/yaml-config-manager
 git checkout v0.3.1                  # 换成旧机器实际运行的版本
 cp .env.example .env && chmod 600 .env
 # 编辑 .env：填写新机器使用的 Access Team Domain、AUD、管理域名和订阅域名
@@ -137,7 +137,7 @@ sudo sh scripts/backup.sh restore /root/restore/备份ID.mcmbackup
 **旧机器上的 Token 不会因为新机器恢复而失效。**只要旧机器仍在运行并能被访问，旧链接就仍然能下载到节点配置。新机器验收通过后：
 
 ```sh
-cd /opt/mihomo-config-manager    # 旧机器上的部署目录
+cd /opt/yaml-config-manager    # 旧机器上的部署目录
 sudo docker compose down
 ```
 
@@ -159,7 +159,7 @@ sudo docker compose down
 
 建议首次上线前和之后定期演练一次，确认备份、密码和流程都可用：
 
-1. 准备**另一台**机器或虚拟机。不要在生产主机上复制一份目录来演练：`compose.yaml` 固定了项目名 `mihomo-config-manager`，演练中的 `docker compose down` 会停止生产容器，端口也会冲突。
+1. 准备**另一台**机器或虚拟机。不要在生产主机上复制一份目录来演练：`compose.yaml` 固定了项目名 `yaml-config-manager`，演练中的 `docker compose down` 会停止生产容器，端口也会冲突。
 2. 部署同版本代码，上传几份只含虚构内容的配置（例如 `proxies: []`），各做一次停用、重置 Token 和上传新版本。
 3. 创建备份并下载，先执行 `verify`，再执行 `restore`。
 4. 再做一次恢复，在输入 `RESTORE` 之后、出现「恢复完成」之前按 Ctrl-C 中断，然后用 `resume` 续作，熟悉中断处理。
@@ -183,7 +183,7 @@ sudo sh scripts/backup.sh resume
 | `拒绝符号链接恢复路径。` | `data` 或恢复相关路径是符号链接 | 换成真实目录后重试 |
 | `已有恢复或校验命令运行。` | 另一个 `backup.sh` 正在执行 | 等它结束 |
 | `存在恢复记录，请先检查并使用 resume…` | 已有 `.restore-state` 或 `.restore-work` | 有 `.restore-state`：运行 `resume`。只有 `.restore-work`：说明在确认前就中断了，现有数据未被改动；确认没有恢复命令在运行后删除 `.restore-work`（其中是已解密的数据），再重新恢复 |
-| `Unable to find image 'mihomo-config-manager-admin:…'` | 没有构建本地镜像 | `sudo docker compose build admin` |
+| `Unable to find image 'yaml-config-manager-admin:…'` | 没有构建本地镜像 | `sudo docker compose build admin` |
 | `备份校验失败：密码错误、归档损坏、格式不支持或存储不可用。` | 密码错误、文件损坏或不完整、超过 `BACKUP_MAX_MIB`、备份与当前程序的数据库结构不一致、暂存空间不足 | 核对 SHA-256 和密码，检查上限、版本和磁盘空间 |
 | `env file … .env not found` 一类 Compose 报错 | 缺少 `.env` | 创建并填写 `.env`，然后 `resume` |
 | `请先妥善移走 data.before-restore…` | 上一次恢复的旧数据仍在；此时服务已停止 | 确认其中没有仍需要的数据后移走，再 `resume` |

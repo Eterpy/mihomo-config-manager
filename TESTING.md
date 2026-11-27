@@ -47,7 +47,7 @@ GitHub Actions 的 `source-and-tests` 与 `containers` 任务分别对应上面�
 python3 scripts/check_public.py
 # 在 git add 之后检查索引中实际将提交的内容：
 python3 scripts/check_public.py --staged
-python3 scripts/package_release.py /tmp/mihomo-config-manager-source.tar.gz
+python3 scripts/package_release.py /tmp/yaml-config-manager-source.tar.gz
 node --check app/static/app.js
 for script in scripts/*.sh; do sh -n "$script"; done
 ```

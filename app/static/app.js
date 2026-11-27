@@ -87,24 +87,88 @@ async function action(type, config) {
     await mutate(() => api(base, { method: "DELETE" }), "配置已删除，旧订阅链接已失效。");
   }
 }
+function askUploadChoice(dialog) {
+  // Escape closes the dialog without setting a new returnValue.
+  dialog.returnValue = "cancel";
+  dialog.showModal();
+  return new Promise(resolve => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue), { once: true });
+  });
+}
+
+async function chooseUploadTarget(filename, matches) {
+  const single = matches.length === 1;
+  $("#upload-match-message").textContent = single
+    ? `已有配置「${matches[0].name}」使用了文件名「${filename}」，请选择如何处理。`
+    : `有 ${matches.length} 份配置使用文件名「${filename}」，请选择要更新的配置，或另存为新配置。`;
+  const select = $("#upload-target");
+  select.replaceChildren(new Option("请选择配置", ""));
+  for (const item of matches) {
+    const updated = new Date(item.updated_at).toLocaleString("zh-CN");
+    select.add(new Option(`${item.name} · v${item.version} · ${updated}`, item.id));
+  }
+  select.value = single ? matches[0].id : "";
+  $("#upload-target-label").hidden = single;
+  const update = $("#upload-update");
+  function showSelection() {
+    const selected = matches.find(item => item.id === select.value);
+    update.disabled = !selected;
+    update.textContent = selected ? `更新「${selected.name}」至 v${selected.version + 1}` : "更新原配置";
+  }
+  select.onchange = showSelection;
+  showSelection();
+  const choice = await askUploadChoice($("#upload-match-dialog"));
+  if (choice === "update") return matches.find(item => item.id === select.value) ?? "cancel";
+  return choice;
+}
+
+async function uploadFile(file, target) {
+  const form = new FormData();
+  form.append("file", file);
+  let nameMessage = "";
+  if (!target) {
+    // Read before each file so earlier uploads in this batch and other admins' changes are visible.
+    const items = await api("/api/configs").then(response => response.json());
+    const matches = items.filter(item => item.filename === file.name);
+    if (matches.length) {
+      const choice = await chooseUploadTarget(file.name, matches);
+      if (choice === "cancel") return "已取消";
+      if (choice === "copy") nameMessage = `为「${file.name}」填写新名称，创建独立订阅链接。`;
+      else target = choice;
+    }
+  }
+  if (target) {
+    const path = `/api/configs/${target.id}/content?expected_current_version=${target.version}`;
+    const updated = await api(path, { method: "PUT", body: form }).then(response => response.json());
+    return `已更新「${updated.name}」至 v${updated.version}`;
+  }
+  const nameInput = $("#upload-name");
+  nameInput.value = "";
+  while (true) {
+    if (nameMessage) {
+      $("#upload-name-message").textContent = nameMessage;
+      if (await askUploadChoice($("#upload-name-dialog")) !== "create") return "已取消";
+      form.set("name", nameInput.value.trim());
+    }
+    try {
+      const created = await api("/api/configs", { method: "POST", body: form }).then(response => response.json());
+      return `已创建「${created.name}」`;
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      nameMessage = `「${file.name}」的显示名称已被使用，请填写其他名称。`;
+    }
+  }
+}
+
 async function uploadFiles(files, config = null) {
   if (busy || !ready || !files.length) return;
   busy = true; render();
   const reports = []; let failed = false;
   for (const file of Array.from(files)) {
-    notify(`正在上传：${file.name}`);
-    const form = new FormData(); form.append("file", file);
-    const path = config ? `/api/configs/${config.id}/content` : "/api/configs";
-    const send = () => api(path, { method: config ? "PUT" : "POST", body: form });
+    notify(`正在处理：${file.name}`);
     try {
-      try { await send(); }
-      catch (error) {
-        if (error.status !== 409 || config) throw error;
-        const name = window.prompt("显示名称已存在，请输入新的显示名称：", file.name.replace(/\.ya?ml$/i, ""));
-        if (!name) throw new Error("已取消上传");
-        form.set("name", name); await send();
-      }
-      reports.push(`${file.name}：${config ? "新版本已发布，订阅链接保持不变" : "上传成功"}`);
+      const result = await uploadFile(file, config);
+      reports.push(`${file.name}：${result}`);
     } catch (error) { failed = true; reports.push(`${file.name}：${error.message}`); }
   }
   busy = false; await load(); notify(reports.join("\n"), failed);

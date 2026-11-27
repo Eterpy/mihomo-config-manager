@@ -5,18 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
   <meta name="color-scheme" content="light dark">
-  <title>Mihomo · 配置管理</title>
+  <title>配置管理</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="Mihomo 配置管理首页"><span class="brand-icon">M</span><span>Mihomo<span class="brand-sub">CONFIG MANAGER</span></span></a>
+    <a class="brand" href="/" aria-label="配置管理首页">
+      <img class="brand-icon" src="/static/brand.png" width="42" height="42" alt="">
+      <span>配置管理</span>
+    </a>
     <div class="top-actions"><span class="private-label"><span class="dot"></span>私有工作空间</span><button id="theme" class="icon-button" aria-label="切换主题">跟随系统</button></div>
   </header>
   <main>
     <section class="page-heading">
-      <div><p class="eyebrow">你的配置，井然有序</p><h1>配置管理</h1><p class="lead">集中保存 Mihomo 配置，让每个订阅始终保持更新。</p></div>
+      <div><h1>配置管理</h1><p class="lead">上传 YAML 配置，管理版本和订阅链接。</p></div>
       <button class="primary" id="upload-top"><span aria-hidden="true">＋</span> 上传配置</button>
     </section>
     <section class="overview" aria-label="配置概况">
@@ -39,7 +42,7 @@
       <div id="no-results" class="empty" hidden><h3>没有找到匹配的配置</h3><p>试试其他名称或文件名。</p></div>
     </section>
       <section class="backup-section"><h2>加密备份</h2><p>备份包含全部配置和历史。密码遗失无法恢复；恢复会重置全部订阅链接。</p><button id="backup-new">创建加密备份</button><button id="backup-refresh">刷新备份</button><div id="backup-list"></div></section>
-  <footer><span class="footer-mark">M</span><p>订阅链接是读取凭据，请妥善保管。泄露时可重置 Token 撤销旧链接。</p><span class="version">V0.3.1</span></footer>
+  <footer><p>订阅链接是读取凭据，请妥善保管。泄露时可重置 Token 撤销旧链接。</p><span class="version">V0.3.1</span></footer>
   </main>
   <template id="card-template">
     <article class="config-card">
@@ -51,6 +54,35 @@
       <div class="card-secondary"><button data-action="rename" data-write>修改名称</button><button data-action="toggle" data-write></button><button data-action="rotate" data-write>重置 Token</button><button data-action="delete" data-write class="danger-text">删除</button></div>
     </article>
   </template>
+
+  <dialog id="upload-match-dialog" class="upload-dialog" aria-labelledby="upload-match-title">
+    <form method="dialog">
+      <h2 id="upload-match-title">发现同名文件</h2>
+      <p id="upload-match-message"></p>
+      <label id="upload-target-label" class="form-label">选择要更新的配置
+        <select id="upload-target"></select>
+      </label>
+      <p>更新会生成新版本，沿用原订阅链接。旧版本按历史保留策略保存。</p>
+      <div class="dialog-footer">
+        <button id="upload-update" class="primary" value="update">更新原配置</button>
+        <button value="copy">另存为新配置</button>
+        <button value="cancel">取消</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="upload-name-dialog" class="upload-dialog" aria-labelledby="upload-name-title">
+    <form method="dialog">
+      <h2 id="upload-name-title">另存为新配置</h2>
+      <p id="upload-name-message"></p>
+      <label class="form-label">新配置名称
+        <input id="upload-name" maxlength="100" required pattern=".*\S.*" autocomplete="off" autofocus>
+      </label>
+      <div class="dialog-footer">
+        <button class="primary" value="create">创建独立订阅</button>
+        <button value="cancel" formnovalidate>取消</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="backup-dialog"><form id="backup-form"><h2>创建加密备份</h2><label class="form-label">密码（16–256 个字符）<input id="backup-password" type="password" minlength="16" maxlength="256" required autocomplete="new-password"></label><label class="form-label">确认密码<input id="backup-confirm" type="password" required autocomplete="new-password"></label><button type="button" data-close="backup-dialog">取消</button><button type="submit">创建</button></form></dialog>
   <dialog id="history-dialog"><div class="dialog-heading"><h2>历史版本</h2><button data-close="history-dialog">关闭</button></div><div id="history-list"></div></dialog>

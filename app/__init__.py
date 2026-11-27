@@ -1,2 +1,2 @@
-"""Mihomo Config Manager."""
+"""YAML Config Manager."""
 

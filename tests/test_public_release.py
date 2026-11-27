@@ -84,7 +84,8 @@ def test_actual_release_contents_and_metadata(tmp_path):
     with tarfile.open(output) as archive:
         names = set(archive.getnames())
         assert names == {p.relative_to(ROOT).as_posix() for p in source_files(ROOT)}
-        assert {'LICENSE', '.github/workflows/ci.yml', 'docs/deployment.md'} <= names
+        assert {'LICENSE', '.github/workflows/ci.yml', 'docs/deployment.md',
+                'app/static/brand.png', 'app/static/brand-license.txt'} <= names
         for member in archive:
             assert member.isfile() and member.uid == member.gid == member.mtime == 0
             assert member.uname == member.gname == ''

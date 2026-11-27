@@ -14,6 +14,7 @@ ROOT_FILES = (
     '.github/workflows/ci.yml', '.github/dependabot.yml',
     '.github/ISSUE_TEMPLATE/bug_report.md', '.github/ISSUE_TEMPLATE/feature_request.md',
     '.github/pull_request_template.md',
+    'app/static/brand.png', 'app/static/brand-license.txt',
 )
 SOURCE_TREES = {
     'app': {'.py', '.html', '.css', '.js'},

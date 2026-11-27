@@ -192,7 +192,7 @@ def release_source(tmp_path):
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text('source fixture\n')
     for name in module['SOURCE_TREES']:
-        (root / name).mkdir()
+        (root / name).mkdir(exist_ok=True)
     (root / 'app/main.py').write_text('print("safe code")\n')
     return module['build_release'], root
 

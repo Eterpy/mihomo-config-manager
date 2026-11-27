@@ -32,7 +32,7 @@
 | POST | `/api/configs` | multipart：`file`（必填，`.yaml`/`.yml`），可选 `name`（≤100 字符，默认取文件名）、`description`（≤2000 字符） | 201，配置对象 |
 | GET | `/api/configs/{id}` | — | 配置对象 |
 | GET | `/api/configs/{id}/preview` | — | 当前版本原始内容，`text/plain` |
-| PUT | `/api/configs/{id}/content` | multipart：只接受 `file` | 新版本的配置对象，订阅 URL 不变 |
+| PUT | `/api/configs/{id}/content` | multipart 只接受 `file`；可选查询参数 `expected_current_version` 为正整数 | 新版本的配置对象，沿用原订阅 URL；传入版本与当前版本不符时返回 409 |
 | PATCH | `/api/configs/{id}` | JSON：`name`、`description`，均可选，不接受其他字段 | 配置对象 |
 | POST | `/api/configs/{id}/enable` | — | 配置对象 |
 | POST | `/api/configs/{id}/disable` | — | 配置对象 |

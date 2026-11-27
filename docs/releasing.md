@@ -6,7 +6,7 @@
 
 ```sh
 python3 scripts/check_public.py
-python3 scripts/package_release.py /tmp/mihomo-config-manager-source.tar.gz
+python3 scripts/package_release.py /tmp/yaml-config-manager-source.tar.gz
 ```
 
 打包工具只收录指定文件和源码扩展名，拒绝符号链接与硬链接，并在写包前执行常见秘密模式检查。输出独占创建，已有包不会覆盖。归档不包含本地 `.git`、虚拟环境、缓存、`.env`、运行数据和备份；归档成员清除本机所有者与修改时间。
@@ -20,9 +20,9 @@ python3 scripts/package_release.py /tmp/mihomo-config-manager-source.tar.gz
 最稳妥的起点是在**全新空目录**解压发布包，然后初始化 Git。这样原工作目录中工具保存的本地快照或历史对象不会进入新仓库。
 
 ```sh
-mkdir mihomo-config-manager-public
-cd mihomo-config-manager-public
-tar -xzf /tmp/mihomo-config-manager-source.tar.gz
+mkdir yaml-config-manager-public
+cd yaml-config-manager-public
+tar -xzf /tmp/yaml-config-manager-source.tar.gz
 git init -b main
 # 使用自己的署名；如需隐藏邮箱，填写 GitHub 提供的 noreply 邮箱。
 git config user.name 'YOUR_PUBLIC_NAME'
@@ -56,9 +56,9 @@ git push -u origin main
    |---|---|
    | `app/main.py` | FastAPI 的 `version` |
    | `app/templates/index.html` | 页脚显示的版本 |
-   | `compose.yaml` | admin 镜像标签 `mihomo-config-manager-admin:<版本>` |
-   | `scripts/backup.sh` | 恢复使用的镜像 `image=mihomo-config-manager-admin:<版本>` |
-   | `compose.test.yaml` | 三处 `mihomo-config-manager-test:<版本>` |
+   | `compose.yaml` | admin 镜像标签 `yaml-config-manager-admin:<版本>` |
+   | `scripts/backup.sh` | 恢复使用的镜像 `image=yaml-config-manager-admin:<版本>` |
+   | `compose.test.yaml` | 三处 `yaml-config-manager-test:<版本>` |
 
    修改后用 `grep -rn '旧版本号' --exclude-dir=.git .` 确认没有遗漏（`CHANGELOG.md` 与 `TESTING.md` 中的历史记录除外）。
 3. 更新依赖时重新生成哈希锁文件，并核查基础镜像版本和 digest。

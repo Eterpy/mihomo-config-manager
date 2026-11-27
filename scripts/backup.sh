@@ -18,7 +18,7 @@ exec 8>.restore-controller.lock
 flock -n 8 || { echo "已有恢复或校验命令运行。" >&2; exit 1; }
 [ -t 0 ] || { echo '需要交互终端。' >&2; exit 1; }
 [ ! -L .restore-work ] && [ ! -L .restore-state ] && [ ! -L data ] || exit 1
-image=mihomo-config-manager-admin:0.3.1
+image=yaml-config-manager-admin:0.3.1
 work="$project_dir/.restore-work"
 if [ "$action" != resume ]; then
     [ ! -e .restore-state ] && [ ! -e "$work" ] || { echo '存在恢复记录，请先检查并使用 resume；不要覆盖暂存数据。' >&2; exit 1; }

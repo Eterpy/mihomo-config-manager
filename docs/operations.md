@@ -35,6 +35,7 @@ docker compose ps
 
 1. 在管理页创建并下载一份加密备份，见 [备份与恢复](backup-restore.md)。
 2. 保留当前源代码、Compose 文件和镜像。每个版本使用自己的应用镜像标签（见 `compose.yaml` 中 admin 的 `image`），不要把不同版本覆盖成同一个标签，以便回退。
+3. 已有部署首次升级到默认项目名为 `yaml-config-manager` 的版本时，运行 `docker compose ls --all`，按部署目录核对现有项目的 `NAME`。在原部署目录的 `.env` 中将 `COMPOSE_PROJECT_NAME` 设为这个值，继续使用原目录和 `data` 挂载。这样下次 `up` 会更新原有容器，恢复脚本也会操作同一项目。
 
 升级：
 

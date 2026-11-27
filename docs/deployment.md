@@ -8,7 +8,7 @@
 
 Docker 旧版本存在 localhost 发布端口可从同一二层网络访问的问题，因此预检拒绝 Engine < 28。也应核查直接路由、额外反向代理和防火墙配置。[Docker 官方说明](https://docs.docker.com/engine/network/port-publishing/)
 
-将源码放到自选目录，例如 `/opt/mihomo-config-manager`。如通过 SSH 传输，使用自己的 SSH 配置；项目不要求特定用户名或端口。已有服务不需要停机或更改路由。
+将源码放到自选目录，例如 `/opt/yaml-config-manager`。如通过 SSH 传输，使用自己的 SSH 配置；项目不要求特定用户名或端口。已有服务不需要停机或更改路由。
 
 ## 配置 Access
 

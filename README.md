@@ -1,8 +1,8 @@
-# Mihomo Config Manager
+# YAML Config Manager
 
-自托管的 Mihomo YAML 配置管理与只读订阅服务，采用 [MIT 许可证](LICENSE)。适合个人或受信任的小团队集中维护配置，并通过独立链接供客户端订阅。
+自托管的 YAML 配置管理与只读订阅服务，应用代码采用 [MIT 许可证](LICENSE)。适合个人或受信任的小团队集中维护配置，并通过独立链接供客户端订阅。
 
-A self-hosted Mihomo YAML configuration manager with version history, encrypted backups, and token-protected subscriptions. MIT licensed. The current interface and documentation are in Chinese.
+A self-hosted YAML configuration manager with version history, encrypted backups, and token-protected subscriptions. The interface and documentation are in Chinese.
 
 ## 功能
 
@@ -15,7 +15,7 @@ A self-hosted Mihomo YAML configuration manager with version history, encrypted 
 
 当前认证方式为 **Cloudflare Access**，生产部署需要自己的 Cloudflare 账号、域名、Access 应用和 Tunnel。没有本地密码登录或生产免认证模式。所有通过 Access 策略的身份共享同一配置库和管理权限；本项目不提供多租户隔离。
 
-本工具不包含 Mihomo 内核，不提供代理节点、订阅转换或在线编辑器。YAML 校验限于安全解析与基本格式，不代表配置已通过 Mihomo 语义校验。
+本工具管理配置文件，代理内核由客户端提供。上传时校验 YAML 语法和基本格式，配置的运行效果由客户端验证。
 
 **订阅链接就是读取凭据。**任何持有完整链接的人都能下载其中的节点信息。请勿把真实 YAML、订阅 URL、环境配置或备份提交到公开仓库。
 
@@ -69,7 +69,7 @@ python3.14 -m venv .venv
 
 ## 使用
 
-- **上传**：登录管理页后上传或拖入 `.yaml` / `.yml` 文件，每份配置自动生成独立订阅链接。在支持 Mihomo YAML 的客户端中导入该链接。
+- **上传**：选择或拖入 `.yaml` / `.yml` 文件即可创建配置，并将订阅链接导入支持该配置格式的客户端。若完整文件名（含扩展名、区分大小写）与已有配置的当前文件名相同，页面会让你选择更新、另存为独立订阅或取消。多份配置同名时，先选择要更新的配置；批量上传时取消只跳过当前文件。
 - **更新**：在配置卡片上「上传新版本」，订阅链接不变，客户端刷新即可得到新内容。
 - **历史与回滚**：「历史版本」可预览当前及保留的旧版本。回滚会复制所选版本生成新版本，保持当前名称、说明、Token 和启停状态。
 - **停用、重置与删除**：停用后链接返回 404，启用后恢复；「重置 Token」使旧链接永久失效，需在客户端换成新链接；删除会同时移除全部历史版本。
@@ -107,9 +107,9 @@ sudo sh scripts/backup.sh resume    # 恢复中断后续作
 ```sh
 .venv/bin/python -m pytest -q -m 'not container'
 python3 scripts/check_public.py
-python3 scripts/package_release.py /tmp/mihomo-config-manager-source.tar.gz
+python3 scripts/package_release.py /tmp/yaml-config-manager-source.tar.gz
 ```
 
 源码包按白名单生成，不含 `.git`、虚拟环境、数据、备份和恢复目录。提交要求见 [贡献指南](CONTRIBUTING.md)。
 
-本项目独立维护，与 Mihomo、Clash 或 Cloudflare 无隶属关系。
+本项目独立维护，与 MetaCubeX、Clash 或 Cloudflare 无隶属关系。导航图标使用 MetaCubeX 上游的原始图片，随附上游许可。[图标来源](https://github.com/MetaCubeX/Clash.Meta/blob/0455d0d28c4526937380505153e65a843d8612e8/Meta.png) · [GPL-3.0 许可](app/static/brand-license.txt)

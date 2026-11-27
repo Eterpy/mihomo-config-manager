@@ -42,6 +42,23 @@ def test_multipart_count_and_body_limit(client):
     assert client.get("/api/configs").json() == []
 
 
+def test_update_confirmed_version_of_selected_config(upload, client):
+    first = upload(filename="config.yaml", name="日常").json()
+    second = upload(filename="config.yaml", name="测试").json()
+    base = f'/api/configs/{second["id"]}'
+    url = base + "/content?expected_current_version=1"
+    updated = client.put(url, files={"file": ("config.yaml", b"value: 2\n")})
+    assert updated.status_code == 200
+    assert updated.json()["subscription_url"] == second["subscription_url"]
+    assert updated.json()["version"] == 2
+
+    stale = client.put(url, files={"file": ("config.yaml", b"value: stale\n")})
+    assert stale.status_code == 409
+    assert client.get(base + "/preview").content == b"value: 2\n"
+    assert [v["version"] for v in client.get(base + "/versions").json()] == [2, 1]
+    assert client.get(f'/api/configs/{first["id"]}').json() == first
+
+
 def test_safe_preview(upload, client):
     content = b'value: "<script>alert(1)</script>"\n'
     item = upload(content, filename="<script>.yaml").json()
