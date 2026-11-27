@@ -5,6 +5,7 @@ import pytest
 from app.backups import unpack_verified, encrypt
 from app.backup_cli import prepare
 from app.services import digest
+from tests.helpers import link, revision
 from tests.test_backups import PASSWORD, finish
 
 
@@ -13,7 +14,7 @@ def malicious_backup(upload, client, application, tmp_path):
     ident = client.post('/api/backups', json={'password': PASSWORD}).json()['id']
     assert finish(client, ident)['status'] == 'ready'
     extracted = tmp_path / 'source'
-    unpack_verified(application.state.backups.download(ident), PASSWORD, extracted)
+    unpack_verified((application.state.backups.root / (ident + '.mcmbackup')), PASSWORD, extracted)
     db = extracted / 'db/manager.sqlite3'
     with sqlite3.connect(db) as con:
         con.execute('CREATE TRIGGER sqliteXkeep_token AFTER UPDATE OF token ON configs BEGIN UPDATE configs SET token=old.token WHERE id=old.id; END')
@@ -50,13 +51,13 @@ def test_restore_guard_rejects_old_tokens_and_publications(upload, client, appli
     item = upload().json()
     ident = client.post('/api/backups', json={'password': PASSWORD}).json()['id']
     assert finish(client, ident)['status'] == 'ready'
-    original = application.state.backups.download(ident)
+    original = (application.state.backups.root / (ident + '.mcmbackup'))
     restored = tmp_path / 'guarded'
     prepare(original, restored, PASSWORD, 1024**3)
     expected = tmp_path / 'expected-proof'
     shutil.copyfile(restored / '.restore-proof', expected)
     verify_install(restored, expected)
-    old_token = item['subscription_url'].split('/s/')[1].split('/')[0]
+    old_token = link(client, item).split('/s/')[1].split('/')[0]
     forbidden = restored / 'published' / (old_token + '.yaml')
     forbidden.write_bytes(b'proxies: []\n')
     with pytest.raises(ValueError, match='publication'):
@@ -96,12 +97,13 @@ def test_new_writes_require_csrf(upload, client):
 def test_rollback_after_rotation_cannot_revive_old_token(upload, client, application):
     item = upload().json()
     base = '/api/configs/' + item['id']
-    client.put(base+'/content', files={'file':('new.yaml', b'v: 2\n')})
-    rotated = client.post(base+'/rotate-token').json()
+    old_link = link(client, item)
+    client.put(base+'/content', params={'expected_current_version': 1}, files={'file':('new.yaml', b'v: 2\n')})
+    rotated = client.post(base+'/rotate-token', params=revision(client, base)).json()
     response = client.post(base+'/versions/1/rollback', json={'expected_current_version':2})
     assert response.status_code == 200
-    assert response.json()['subscription_url'] == rotated['subscription_url']
-    old = item['subscription_url'].split('/s/')[1].split('/')[0]
+    assert link(client, response.json()) == link(client, rotated)
+    old = old_link.split('/s/')[1].split('/')[0]
     assert not (application.state.store.published / (old+'.yaml')).exists()
 
 
@@ -151,6 +153,8 @@ def test_resume_never_starts_containers_after_guard_failure(tmp_path, state):
     project = tmp_path / 'project'; scripts = project / 'scripts'; scripts.mkdir(parents=True)
     script = Path('scripts/backup.sh').read_text().replace('[ -t 0 ]', 'true')
     (scripts / 'backup.sh').write_text(script)
+    (project / '.env').touch()
+    (scripts / 'check-compose-project.sh').write_bytes(Path('scripts/check-compose-project.sh').read_bytes())
     (project / '.restore-state').write_text(state)
     for directory in ['data/db', '.restore-work/data/db']:
         (project / directory).mkdir(parents=True)
@@ -160,7 +164,7 @@ def test_resume_never_starts_containers_after_guard_failure(tmp_path, state):
         'id': '#!/bin/sh\necho 0\n',
         'flock': '#!/bin/sh\nexit 0\n',
         'sync': '#!/bin/sh\nexit 0\n',
-        'docker': '#!/bin/sh\nprintf "%s\\n" "$*" >> "$AUDIT_LOG"\ncase "$*" in *app.restore_guard*) exit 1;; esac\nexit 0\n',
+        'docker': '#!/bin/sh\nprintf "%s\\n" "$*" >> "$AUDIT_LOG"\ncase "$*" in "compose config") echo "name: test";; *app.restore_guard*) exit 1;; esac\nexit 0\n',
     }.items():
         path = binaries / name; path.write_text(body); path.chmod(0o700)
     log = tmp_path / 'commands'

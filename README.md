@@ -74,6 +74,8 @@ python3.14 -m venv .venv
 - **历史与回滚**：「历史版本」可预览当前及保留的旧版本。回滚会复制所选版本生成新版本，保持当前名称、说明、Token 和启停状态。
 - **停用、重置与删除**：停用后链接返回 404，启用后恢复；「重置 Token」使旧链接永久失效，需在客户端换成新链接；删除会同时移除全部历史版本。
 
+复制订阅链接时，管理页才向服务器领取这份配置的凭据。多标签页可以同时管理配置；若另一页先保存了修改，请核对最新状态后重试。
+
 公开端只接受精确的 `/s/<Token>/profile.yaml` 路径和 GET / HEAD 请求，不接受查询参数。管理 API 与管理页使用同一套认证，见 [接口说明](docs/api.md)。
 
 ## 备份与恢复
@@ -112,4 +114,4 @@ python3 scripts/package_release.py /tmp/yaml-config-manager-source.tar.gz
 
 源码包按白名单生成，不含 `.git`、虚拟环境、数据、备份和恢复目录。提交要求见 [贡献指南](CONTRIBUTING.md)。
 
-本项目独立维护，与 MetaCubeX、Clash 或 Cloudflare 无隶属关系。导航图标使用 MetaCubeX 上游的原始图片，随附上游许可。[图标来源](https://github.com/MetaCubeX/Clash.Meta/blob/0455d0d28c4526937380505153e65a843d8612e8/Meta.png) · [GPL-3.0 许可](app/static/brand-license.txt)
+本项目独立维护，与 MetaCubeX、Clash 或 Cloudflare 无隶属关系。导航图标使用 MetaCubeX 上游的图标，等比缩小至 126 像素，随附上游许可。[图标来源](https://github.com/MetaCubeX/Clash.Meta/blob/0455d0d28c4526937380505153e65a843d8612e8/Meta.png) · [GPL-3.0 许可](app/static/brand-license.txt)

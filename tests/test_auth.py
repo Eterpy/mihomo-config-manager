@@ -38,10 +38,10 @@ def test_csrf_and_origin(client):
 def test_csrf_identity_expiry_and_restart():
     first = CSRF()
     token = first.issue("admin")
-    assert first.verify("admin", token, token)
-    assert not first.verify("other", token, token)
-    assert not first.verify("admin", "1." + token.split(".", 1)[1], token)
-    assert not CSRF().verify("admin", token, token)
+    assert first.verify("admin", token)
+    assert not first.verify("other", token)
+    assert not first.verify("admin", "1." + token.split(".", 1)[1])
+    assert not CSRF().verify("admin", token)
 
 
 def test_jwks_rotation_and_throttle(settings, keys):
@@ -104,8 +104,7 @@ def test_health_is_local_only(application, settings):
 
 def test_cookie_headers_and_identity_binding(client, settings, keys):
     response = client.get("/")
-    cookie = response.headers["set-cookie"]
-    assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=strict" in cookie
+    assert "set-cookie" not in response.headers
     assert response.headers["cache-control"] == "private, no-store, max-age=0"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
     assert client.post("/api/configs", headers={"Cf-Access-Jwt-Assertion": keys.token(settings, sub="another-user")}).status_code == 403

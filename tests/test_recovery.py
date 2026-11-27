@@ -20,6 +20,7 @@ def source(tmp_path):
 def test_revocation_failure_replays(settings, source, monkeypatch, action):
     store = Store(settings)
     item = store.create(source, "x.yaml", "x")
+    old_path = published(store, item)
     monkeypatch.setattr(store, "_withdraw", lambda token: (_ for _ in ()).throw(OSError("injected")))
     with pytest.raises(AppError) as error:
         store.change(item["id"], action)
@@ -29,7 +30,7 @@ def test_revocation_failure_replays(settings, source, monkeypatch, action):
         store.rename(item["id"], "cannot write")
     store.close()
     recovered = Store(settings)
-    assert not published(recovered, item).exists()
+    assert not old_path.exists()
     assert recovered.ready and not recovered.failed
     if action != "delete":
         current = recovered.get(item["id"])
@@ -42,17 +43,19 @@ def test_revocation_failure_replays(settings, source, monkeypatch, action):
 def test_rotation_failure_never_republishes_revoked_token(settings, source, monkeypatch):
     store = Store(settings)
     item = store.create(source, "x.yaml", "x")
+    old_path = published(store, item)
     monkeypatch.setattr(store, "_publish", lambda row: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(AppError):
         store.change(item["id"], "rotate-token")
-    assert not published(store, item).exists()
+    assert not old_path.exists()
     pending = store.get(item["id"])
+    pending_url = store.subscription_url(item["id"])
     assert pending["status"] == "pending"
     store.close()
     recovered = Store(settings)
-    assert recovered.get(item["id"])["subscription_url"] == pending["subscription_url"]
+    assert recovered.subscription_url(item["id"]) == pending_url
     assert published(recovered, pending).exists()
-    assert not published(recovered, item).exists()
+    assert not old_path.exists()
     recovered.close()
 
 

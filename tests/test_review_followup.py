@@ -19,7 +19,7 @@ def test_restore_reference_rejects_another_valid_preparation(upload, client, app
     upload()
     ident = client.post('/api/backups', json={'password': PASSWORD}).json()['id']
     assert finish(client, ident)['status'] == 'ready'
-    archive = application.state.backups.download(ident)
+    archive = (application.state.backups.root / (ident + '.mcmbackup'))
     old, fresh = tmp_path / 'old', tmp_path / 'fresh'
     prepare(archive, old, PASSWORD, 1024**3)
     prepare(archive, fresh, PASSWORD, 1024**3)
@@ -54,6 +54,8 @@ def test_resume_binds_real_guard_to_current_restore(tmp_path, settings, state, m
     scripts.mkdir(parents=True)
     (scripts / 'backup.sh').write_text(script_source.read_text().replace('[ -t 0 ]', 'true'))
     (scripts / 'init-data.sh').write_text('exit 0\n')
+    (project / '.env').touch()
+    (scripts / 'check-compose-project.sh').write_bytes(Path('scripts/check-compose-project.sh').read_bytes())
     (project / '.restore-state').write_text(state)
     work = project / '.restore-work'
     work.mkdir()
@@ -63,6 +65,7 @@ def test_resume_binds_real_guard_to_current_restore(tmp_path, settings, state, m
     candidate = work / 'data' if state == 'prepared' else project / 'data'
     store = Store(replace(settings, data_dir=candidate))
     item = store.create(source, 'test.yaml', 'test')
+    saved_link = store.subscription_url(item['id'])
     with store.db.connect() as con:
         (candidate / '.restore-proof').write_text(token_fingerprint(con))
     store.close()
@@ -79,6 +82,7 @@ def test_resume_binds_real_guard_to_current_restore(tmp_path, settings, state, m
         'docker': '''#!/bin/sh
 printf '%s\\n' "$*" >> "$AUDIT_LOG"
 case "$*" in
+  "compose config") echo "name: test";;
   *app.restore_guard*)
     case "$*" in *'/restore-control/expected-proof') ;; *) exit 9;; esac
     "$TEST_PYTHON" -m app.restore_guard "$TEST_PROJECT/data" "$TEST_PROJECT/.restore-work/expected-proof";;
@@ -104,7 +108,7 @@ esac
         assert not work.exists()
     else:
         assert 'compose up' not in log.read_text()
-    assert item['subscription_url'].encode() not in result.stdout + result.stderr
+    assert saved_link.encode() not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize('lock', ['missing', 'no_db', 'symlink'])
@@ -122,6 +126,8 @@ def test_resume_moves_data_admin_never_opened(tmp_path, settings, lock):
     scripts.mkdir(parents=True)
     (scripts / 'backup.sh').write_text(script_source.read_text().replace('[ -t 0 ]', 'true'))
     (scripts / 'init-data.sh').write_text('exit 0\n')
+    (project / '.env').touch()
+    (scripts / 'check-compose-project.sh').write_bytes(Path('scripts/check-compose-project.sh').read_bytes())
     (project / '.restore-state').write_text('prepared')
     work = project / '.restore-work'
     work.mkdir()
@@ -150,6 +156,7 @@ def test_resume_moves_data_admin_never_opened(tmp_path, settings, lock):
         'docker': '''#!/bin/sh
 printf '%s\\n' "$*" >> "$AUDIT_LOG"
 case "$*" in
+  "compose config") echo "name: test";;
   *app.restore_guard*) "$TEST_PYTHON" -m app.restore_guard "$TEST_PROJECT/data" "$TEST_PROJECT/.restore-work/expected-proof";;
   *) exit 0;;
 esac

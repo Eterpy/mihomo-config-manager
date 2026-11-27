@@ -15,6 +15,7 @@ if [ "$engine_major" -lt 28 ]; then
 fi
 test -f .env || { echo '请先从 .env.example 创建 .env 并填写 Access 配置' >&2; exit 1; }
 docker compose config --quiet
+sh scripts/check-compose-project.sh
 if command -v ss >/dev/null 2>&1; then
     if ss -H -ltn '( sport = :18080 or sport = :18081 )' | read -r line; then
         echo '18080 或 18081 已被占用；首次部署停止。升级现有项目请先核对 docker compose ps。' >&2

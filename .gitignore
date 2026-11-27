@@ -61,3 +61,6 @@ restore-*/
 !/compose.test.yaml
 !/.github/workflows/*.yml
 !/.github/dependabot.yml
+
+# Internal review notes
+/REVIEW_PLAN.md

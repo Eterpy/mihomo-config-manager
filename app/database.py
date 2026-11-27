@@ -62,7 +62,7 @@ def validate_schema(con):
 class Database:
     def __init__(self, path: Path):
         self.path = path
-        with self.connect() as con:
+        with self.connect(create=True) as con:
             con.execute("PRAGMA journal_mode=WAL")
             version = con.execute("PRAGMA user_version").fetchone()[0]
             if version == 0:
@@ -75,8 +75,9 @@ class Database:
                 raise RuntimeError("数据库版本不兼容；请使用匹配的应用版本")
 
     @contextmanager
-    def connect(self):
-        con = sqlite3.connect(self.path, timeout=5)
+    def connect(self, *, create=False):
+        mode = 'rwc' if create else 'rw'
+        con = sqlite3.connect(f'{self.path.resolve().as_uri()}?mode={mode}', uri=True, timeout=5)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA foreign_keys=ON")
         con.execute("PRAGMA busy_timeout=5000")

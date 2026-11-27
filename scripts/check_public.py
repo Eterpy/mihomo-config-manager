@@ -1,6 +1,7 @@
 """Check release inputs or Git index locally; never print matched secret values."""
 import argparse
 import os
+import re
 from pathlib import Path
 import subprocess
 
@@ -60,7 +61,8 @@ def main():
         return 1
     for name, line, label in problems:
         # repr escapes control characters in filenames supplied by contributors.
-        print(f'{name!r}:{line}: {label} (value omitted)')
+        safe_name = re.sub(r'[0-9a-fA-F]{32,}', lambda match: match[0][:4] + '…', name)
+        print(f'{safe_name!r}:{line}: {label} (value omitted)')
     if problems:
         print('发布检查未通过，请移除敏感内容或核对新增文件。')
         return 1

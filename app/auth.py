@@ -8,7 +8,7 @@ import time
 import httpx
 import jwt
 from starlette.exceptions import HTTPException
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
 from .errors import AppError
 
@@ -71,7 +71,7 @@ class AccessVerifier:
             if header.get("alg") != "RS256" or not isinstance(header.get("kid"), str) or len(header["kid"]) > 256:
                 raise ValueError("invalid JWT header")
             key = await self._key(header["kid"])
-            claims = jwt.decode(token, key, algorithms=["RS256"], audience=self.settings.audience, issuer=self.settings.issuer, options={"require": ["exp", "iat", "iss", "aud", "sub"]})
+            claims = jwt.decode(token, key, algorithms=["RS256"], audience=self.settings.audience, issuer=self.settings.issuer, leeway=60, options={"require": ["exp", "iat", "iss", "aud", "sub"]})
             if not isinstance(claims["sub"], str) or not claims["sub"].strip():
                 raise ValueError("missing identity")
             return claims
@@ -82,18 +82,16 @@ class AccessVerifier:
 
 
 class CSRF:
-    def __init__(self, secure=True):
+    def __init__(self):
         self.secret = secrets.token_bytes(32)
-        self.secure = secure
-        self.cookie_name = "__Host-mcm-csrf" if secure else "mcm-test-csrf"
 
     def issue(self, subject):
-        payload = f"{int(time.time()) + 3600}.{secrets.token_hex(32)}"
+        payload = f"{int(time.time()) + 12 * 3600}.{secrets.token_hex(32)}"
         signature = hmac.new(self.secret, f"{subject}\0{payload}".encode(), hashlib.sha256).hexdigest()
         return f"{payload}.{signature}"
 
-    def verify(self, subject, token, cookie):
-        if not token or not cookie or len(token) > 256 or not hmac.compare_digest(token, cookie):
+    def verify(self, subject, token):
+        if not token or len(token) > 256:
             return False
         try:
             expires, nonce, signature = token.split(".")
@@ -140,10 +138,14 @@ class SecurityBoundary:
             identity = await self.verifier.verify(request.headers.get("cf-access-jwt-assertion"))
             scope.setdefault("state", {})["identity"] = identity
             if scope["method"] not in {"GET", "HEAD", "OPTIONS"}:
-                if request.headers.get("origin") != self.settings.origin or not self.csrf.verify(identity["sub"], request.headers.get("x-csrf-token"), request.cookies.get(self.csrf.cookie_name)):
-                    raise AppError(403, "来源或 CSRF 校验失败，请刷新页面重试")
-            if scope["method"] not in {"GET", "HEAD", "OPTIONS"} and getattr(getattr(scope.get("app"), "state", None), "store", None) and scope["app"].state.store.snapshotting:
-                raise AppError(503, "正在创建一致快照，请稍后重试")
+                if request.headers.get("origin") != self.settings.origin:
+                    raise AppError(403, "请求来源校验失败")
+                if not self.csrf.verify(identity["sub"], request.headers.get("x-csrf-token")):
+                    raise AppError(403, "页面凭据已失效，请刷新后重试", code="csrf")
+                store = getattr(request.app.state, "store", None)
+                read_link = scope["method"] == "POST" and scope["path"].endswith("/subscription-link")
+                if store and store.snapshotting and not read_link:
+                    raise AppError(503, "正在创建一致快照，请稍后重试")
             upload = scope["method"] == "POST" and scope["path"] == "/api/configs" or scope["method"] == "PUT" and scope["path"].endswith("/content")
             limit = self.settings.max_upload_bytes + 65536 if upload else 65536
             length = request.headers.get("content-length")
@@ -174,7 +176,12 @@ class SecurityBoundary:
             await self.app(scope, limited_receive, safe_send)
         except AppError as exc:
             if not started:
-                await JSONResponse({"detail": exc.message}, status_code=exc.status, headers={"Retry-After": "2"} if exc.status == 429 else None)(scope, receive, safe_send)
+                if exc.status in (401, 503) and scope["method"] == "GET" and not scope["path"].startswith(("/api/", "/static/")) and scope["path"] != "/openapi.json" and "text/html" in request.headers.get("accept", ""):
+                    title = "登录已过期或校验未通过" if exc.status == 401 else "认证服务暂不可用"
+                    response = HTMLResponse(f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>{title}</title><h1>{title}</h1><p><a href="/">重新加载</a></p><p><a href="/cdn-cgi/access/logout">退出后重新登录</a></p></html>', status_code=exc.status)
+                else:
+                    response = JSONResponse(exc.body, status_code=exc.status, headers={"Retry-After": "2"} if exc.status == 429 else None)
+                await response(scope, receive, safe_send)
         except Exception:
             # Never log arbitrary exceptions: they may contain YAML or token paths.
             if not started:

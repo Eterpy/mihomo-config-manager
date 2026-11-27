@@ -57,3 +57,6 @@ build
 **/*.tgz
 **/.aws
 **/.ssh
+
+# Internal review notes
+/REVIEW_PLAN.md

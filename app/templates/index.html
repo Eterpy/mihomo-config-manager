@@ -27,6 +27,7 @@
       <div><span class="metric-label">已启用</span><strong id="enabled">—</strong><span class="metric-note">订阅可用</span></div>
       <div class="status-metric"><span class="metric-label">运行状态</span><strong id="service-status" class="status-text">正在连接</strong><span class="metric-note">Cloudflare Access 保护</span></div>
     </section>
+    <p id="login-notice" role="alert" hidden>连接中断或登录已过期。<a href="/">重新登录</a></p>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <section id="dropzone" class="dropzone" aria-label="拖拽上传区域">
       <div class="upload-symbol" aria-hidden="true">↑</div>
@@ -41,8 +42,8 @@
       <div id="empty" class="empty" hidden><span class="empty-icon" aria-hidden="true">{ }</span><h3>从第一份配置开始</h3><p>上传后会自动生成独立订阅链接。更新文件时，链接保持不变。</p></div>
       <div id="no-results" class="empty" hidden><h3>没有找到匹配的配置</h3><p>试试其他名称或文件名。</p></div>
     </section>
-      <section class="backup-section"><h2>加密备份</h2><p>备份包含全部配置和历史。密码遗失无法恢复；恢复会重置全部订阅链接。</p><button id="backup-new">创建加密备份</button><button id="backup-refresh">刷新备份</button><div id="backup-list"></div></section>
-  <footer><p>订阅链接是读取凭据，请妥善保管。泄露时可重置 Token 撤销旧链接。</p><span class="version">V0.3.1</span></footer>
+      <section class="backup-section"><h2>加密备份</h2><p>备份包含全部配置和历史。密码遗失无法恢复；恢复会重置全部订阅链接。</p><button id="backup-new">创建加密备份</button><button id="backup-refresh">刷新备份</button><p id="backup-quota"></p><div id="backup-list"></div></section>
+  <footer><p>订阅链接是读取凭据，请妥善保管。泄露时可重置 Token 撤销旧链接。</p><span class="version">V0.4.0</span></footer>
   </main>
   <template id="card-template">
     <article class="config-card">

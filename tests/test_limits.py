@@ -1,3 +1,4 @@
+from tests.helpers import link
 import concurrent.futures
 import sys
 import threading
@@ -48,15 +49,15 @@ def test_openapi_auth_and_multipart(client):
     assert document["security"] == [{"AccessJWT": []}]
     upload = document["paths"]["/api/configs"]["post"]
     assert "multipart/form-data" in upload["requestBody"]["content"]
-    assert upload["security"][0] == {"AccessJWT": [], "CSRFHeader": [], "CSRFCookie": []}
+    assert upload["security"][0] == {"AccessJWT": [], "CSRFHeader": []}
 
 
 def test_logs_do_not_contain_yaml_or_tokens(client, upload, application, monkeypatch, caplog):
     item = upload(b"secret: do-not-log-fixture\n").json()
-    token = item["subscription_url"].split("/")[-2]
+    token = link(client, item).split("/")[-2]
     def fail(row):
         raise OSError(f"token {token} do-not-log-fixture")
     monkeypatch.setattr(application.state.store, "_publish", fail)
-    assert client.post(f'/api/configs/{item["id"]}/rotate-token').status_code == 503
+    assert client.post(f'/api/configs/{item["id"]}/rotate-token', params={"expected_updated_at": item["updated_at"]}).status_code == 503
     assert token not in caplog.text and "do-not-log-fixture" not in caplog.text
     assert "storage_operation_pending" in caplog.text

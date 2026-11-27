@@ -28,9 +28,9 @@
 
 存放与保管：
 
-- 每份备份至少下载一份到**服务器之外**。`data/backups` 与业务数据在同一磁盘；同机恢复时它还会随旧数据一起移入 `data.before-restore`，不能作为唯一副本。
+- 每份备份至少下载一份到**服务器之外**。`data/backups` 与业务数据在同一磁盘；同机恢复时它还会随旧数据一起移入 `data.before-restore-<UTC时间戳>`，不能作为唯一副本。
 - 密码与备份文件分开保存，例如保存在密码管理器中。不同备份可以使用不同密码。
-- 服务器端容量受 `BACKUP_MAX_MIB`（单次上限）和 `BACKUP_QUOTA_MIB`（已完成备份总量）限制，见 [部署指南](deployment.md) 的环境变量表。达到配额时不会自动删除旧备份，需在管理页手动删除。
+- 服务器端容量受 `BACKUP_MAX_MIB`（单次上限）和 `BACKUP_QUOTA_MIB`（在盘加密归档总量）限制，见 [部署指南](deployment.md) 的环境变量表。配额按压缩加密后的实际字节计算，未登记的归档也计入已用量。达到配额时不会自动删除旧备份，需在管理页手动删除。
 - 建议至少保留最近几份备份，以及每次升级前的那一份；并按「恢复演练」一节定期验证备份确实可以恢复。
 
 ## 创建、下载与校验
@@ -45,6 +45,8 @@
 
 4. 「失败」通常是容量配额、磁盘空间不足或任务被重启中断，修正后重新创建即可。服务重启时，未完成的任务会被标记为失败并清理暂存文件，不会自动重试。
 
+列表会报告归档缺失或大小异常；下载前还会核对 SHA-256。未登记的普通归档保留并单列，管理员可按文件名核对后手动删除。
+
 离线校验只解密和检查，不停止服务、不改动数据，适合在恢复前或定期确认备份可用：
 
 ```sh
@@ -58,13 +60,13 @@ sudo sh scripts/backup.sh verify /root/restore/备份ID.mcmbackup
 同机恢复和迁移都先逐项确认：
 
 - [ ] 在 SSH 等**交互终端**中用 `sudo` 执行。cron、管道和 `nohup` 都会被拒绝；备份密码只能在提示时隐藏输入，不能放在参数或环境变量中。
-- [ ] 部署目录已有填写完整的 `.env`。脚本会调用 `docker compose`，缺少 `.env` 会在停止服务这一步失败。
+- [ ] 部署目录已有填写完整的 `.env`。脚本会调用 `docker compose`，脚本在解密和停服前检查 Compose 配置、镜像及项目冲突。
 - [ ] 已构建当前代码对应的 admin 镜像：`sudo docker compose build admin`。恢复在该本地镜像中执行，不会从网络拉取。
 - [ ] 备份文件使用绝对路径，是普通文件而非符号链接，路径中没有逗号。建议放在部署目录之外，例如 `/root/restore/`。部署目录路径同样不能有逗号。
-- [ ] 部署目录中**没有** `data.before-restore`。它是上一次恢复留下的旧数据；若存在，脚本会在已经停止服务之后才报错。
+- [ ] 核对上次恢复留下的旧数据和可用空间。每次恢复单独保存旧目录；本次目标若已存在，脚本在停服前退出。0.3.x 的固定目录 `data.before-restore` 可与新目录共存。
 - [ ] 部署目录中没有 `.restore-state` 或 `.restore-work`；若有，说明上次恢复未完成，先按「中断、续作与故障对照」处理。
 - [ ] 磁盘剩余空间不少于备份文件大小加上解压后的数据量。
-- [ ] 备份超过 1024 MiB 时，`verify` 和 `restore` 都加上同一上限，例如 `sudo BACKUP_MAX_MIB=2048 sh scripts/backup.sh restore ...`。
+- [ ] 恢复工具优先使用显式传入的 `BACKUP_MAX_MIB`，其次读取部署目录 `.env` 的纯数字设置，默认 1024。需要临时提高时，`verify` 和 `restore` 都加上同一上限，例如 `sudo BACKUP_MAX_MIB=2048 sh scripts/backup.sh restore ...`。
 
 ## 同机恢复
 
@@ -78,11 +80,11 @@ sudo sh scripts/backup.sh restore /root/restore/备份ID.mcmbackup
 
 1. 提示输入备份密码；完整认证并校验归档、清单、数据库结构及版本关系，在暂存目录中换新全部 Token，然后显示配置数量。
 2. 提示输入 `RESTORE` 确认。输入其他内容会取消并删除暂存数据，现有服务和数据不受影响。
-3. 确认后停止本项目的两个容器，把现有 `data` 移到 `data.before-restore`。
+3. 确认后停止本项目的两个容器，把现有 `data` 移到 `data.before-restore-<UTC时间戳>`。
 4. 安装恢复后的数据，校验它确实是本次准备的结果，再重设数据目录权限。
 5. 先启动 admin，健康后再启动 public。
 
-成功时提示「恢复完成」。之后按「恢复后检查清单」逐项完成。注意，原来位于 `data/backups` 的服务器端备份现在位于 `data.before-restore/backups`。
+确认前取消或收到 INT、TERM、HUP 会清理解密暂存。确认后中断则保留恢复记录，使用 `resume` 续作。成功时提示「恢复完成」。之后按「恢复后检查清单」逐项完成。注意，原来位于 `data/backups` 的服务器端备份现在位于脚本输出的时间戳旧目录下的 `backups/`。
 
 ## 迁移到新机器
 
@@ -97,7 +99,7 @@ sudo sh scripts/backup.sh restore /root/restore/备份ID.mcmbackup
 ```sh
 git clone "$REPO_URL" /opt/yaml-config-manager
 cd /opt/yaml-config-manager
-git checkout v0.3.1                  # 换成旧机器实际运行的版本
+git checkout v0.4.0                  # 换成旧机器实际运行的版本
 cp .env.example .env && chmod 600 .env
 # 编辑 .env：填写新机器使用的 Access Team Domain、AUD、管理域名和订阅域名
 sudo sh scripts/init-data.sh
@@ -106,7 +108,7 @@ sudo docker compose up -d --build --wait --wait-timeout 120
 sudo docker compose ps               # admin 与 public 均为 healthy
 ```
 
-先启动服务可以在恢复前确认 `.env`、镜像和权限都正确。此时的空数据会在恢复时移到 `data.before-restore`，验收后删除即可。Tunnel 可以等恢复完成后再配置。
+先启动服务可以在恢复前确认 `.env`、镜像和权限都正确。此时的空数据会在恢复时移到 `data.before-restore-<UTC时间戳>`，验收后删除即可。Tunnel 可以等恢复完成后再配置。
 
 - 新机器可以使用新的域名。订阅链接按 `.env` 中的 `PUBLIC_BASE_URL` 实时生成，恢复后自动使用新域名。
 - 管理域名不变时可沿用原 Access 应用；更换管理域名时需要为新域名配置 Access，并填写对应的 AUD。
@@ -141,7 +143,7 @@ cd /opt/yaml-config-manager    # 旧机器上的部署目录
 sudo docker compose down
 ```
 
-然后在 Cloudflare 中删除旧机器的 Tunnel 路由或连接器。确认不再需要回退后，由管理员删除旧机器上的 `data/`、`data.before-restore/` 和备份文件。
+然后在 Cloudflare 中删除旧机器的 Tunnel 路由或连接器。确认不再需要回退后，由管理员删除旧机器上的 `data/`、`data.before-restore-<UTC时间戳>/` 和备份文件。
 
 需要两台机器长期同时运行（例如冷备）时，分别使用不同的域名和 Tunnel。两边的 Token 互相独立，在一边重置 Token 不会影响另一边。
 
@@ -152,7 +154,7 @@ sudo docker compose down
 - [ ] 逐个复制新订阅链接，更新到所有客户端；旧链接应返回 404。
 - [ ] 重新执行备份之后在旧数据上做过的修改：停用、删除、重置 Token 或上传新版本。
 - [ ] 恢复后的备份列表为空：立即新建一份备份并下载到服务器之外。
-- [ ] 确认无误后删除恢复用的备份副本，以及 `data.before-restore`。它包含旧 Token 和节点内容，不能打包、上传或公开。
+- [ ] 确认无误后删除恢复用的备份副本，以及 `data.before-restore-<UTC时间戳>`。它包含旧 Token 和节点内容，不能打包、上传或公开。
 - [ ] 如果是因为凭据泄露而恢复，还要轮换受影响的节点凭据，见 [安全政策](../SECURITY.md)。
 
 ## 恢复演练
@@ -182,14 +184,15 @@ sudo sh scripts/backup.sh resume
 | `归档必须使用绝对路径。` / `归档路径不能包含逗号。` / `项目路径不能包含逗号。` | 路径不符合要求 | 把文件或部署目录移到符合要求的路径 |
 | `拒绝符号链接恢复路径。` | `data` 或恢复相关路径是符号链接 | 换成真实目录后重试 |
 | `已有恢复或校验命令运行。` | 另一个 `backup.sh` 正在执行 | 等它结束 |
-| `存在恢复记录，请先检查并使用 resume…` | 已有 `.restore-state` 或 `.restore-work` | 有 `.restore-state`：运行 `resume`。只有 `.restore-work`：说明在确认前就中断了，现有数据未被改动；确认没有恢复命令在运行后删除 `.restore-work`（其中是已解密的数据），再重新恢复 |
+| `存在恢复记录，请先检查并使用 resume…` | 已有 `.restore-state` 或 `.restore-work` | 有 `.restore-state`：运行 `resume`。只有 `.restore-work`：核对数据目录、容器状态和是否存在活动恢复命令，再妥善移走或清理残留明文 |
 | `Unable to find image 'yaml-config-manager-admin:…'` | 没有构建本地镜像 | `sudo docker compose build admin` |
-| `备份校验失败：密码错误、归档损坏、格式不支持或存储不可用。` | 密码错误、文件损坏或不完整、超过 `BACKUP_MAX_MIB`、备份与当前程序的数据库结构不一致、暂存空间不足 | 核对 SHA-256 和密码，检查上限、版本和磁盘空间 |
-| `env file … .env not found` 一类 Compose 报错 | 缺少 `.env` | 创建并填写 `.env`，然后 `resume` |
-| `请先妥善移走 data.before-restore…` | 上一次恢复的旧数据仍在；此时服务已停止 | 确认其中没有仍需要的数据后移走，再 `resume` |
+| 提示密码错误或文件被修改 | 认证标签未通过 | 核对密码和备份 SHA-256 |
+| 提示大小超限、文件头无效、数据库结构不兼容或暂存不可写 | 相应的容量、格式、版本或磁盘检查失败 | 按提示核对上限、来源、版本和磁盘权限 |
+| `env file … .env not found` 一类 Compose 报错 | 缺少 `.env` | 补全 `.env` 后重新运行原命令 |
+| 提示本次目标已存在或其他项目占用目录、端口 | 停服前检查发现冲突 | 核对旧数据和 Compose 项目名后再运行 |
 | `数据仍被其他进程使用。` | 另一个进程持有数据库写锁 | 用 `docker ps` 找到并停止另一个 admin 实例，再 `resume` |
 | `恢复记录无效，停止。` | `.restore-state` 被改动或损坏 | 不要手动修复，保留现场后按下一行处理 |
-| `恢复数据与准备阶段不匹配，禁止启动订阅服务。` | 安装的数据不是本次准备的结果，或数据库、发布目录状态异常 | 保持公开服务停止，保留 `data`、`data.before-restore` 和 `.restore-work`，核实目录状态后从原始加密备份重新准备 |
+| `恢复数据与准备阶段不匹配，禁止启动订阅服务。` | 安装的数据不是本次准备的结果，或数据库、发布目录状态异常 | 保持公开服务停止，保留 `data`、`data.before-restore-<UTC时间戳>` 和 `.restore-work`，核实目录状态后从原始加密备份重新准备 |
 | `管理端恢复失败，公开服务保持停止。修复后运行 resume。` | admin 健康检查失败 | 查看 `docker compose logs admin`，修正环境变量、权限或磁盘后 `resume` |
 
 若提示存在未 checkpoint 的 WAL，同样保持服务停止，先核查数据库与恢复记录，不要删除 WAL 文件。
@@ -198,7 +201,7 @@ sudo sh scripts/backup.sh resume
 
 ### 创建
 
-1. 在存储锁内暂停写入，检查备份配额与磁盘空间，用 SQLite 在线备份接口生成数据库快照，复制全部保留的私有版本。
+1. 在存储锁内暂停写入，检查归档大小与临时磁盘空间，用 SQLite 在线备份接口生成数据库快照，复制全部保留的私有版本。
 2. 释放存储锁后生成带大小和 SHA-256 的 `manifest.json`，打成 gzip tar 并加密。暂存目录为 `data/backups/.work-<ID>`，完成后原子重命名为 `<ID>.mcmbackup`。
 
 ### 格式 v1
@@ -216,8 +219,8 @@ sudo sh scripts/backup.sh resume
 | `.restore-state` | 含义 | `resume` 的下一步 |
 |---|---|---|
 | （不存在） | 尚未确认，现有数据未改动 | 无法续作 |
-| `prepared` | 已确认，旧数据尚未移动 | 停止服务，把 `data` 移到 `data.before-restore` |
+| `prepared` | 已确认，旧数据尚未移动 | 停止服务，把 `data` 移到 `data.before-restore-<UTC时间戳>` |
 | `old_moved` | 旧数据已移走 | 把 `.restore-work/data` 移为 `data` |
 | `installed` | 新数据已就位 | 校验后启动 |
 
-每次启动前都会运行 `app.restore_guard`：确认 `data/.restore-proof` 与移动目录前固定在数据目录之外的 `.restore-work/expected-proof` 一致，并与数据库中的配置和 Token 指纹一致；没有未完成操作，发布目录只含已启用配置的新 Token 文件。另一轮恢复留下的旧目录即使带有自己的有效指纹也不能通过。不要删除、复制替换或手工伪造这些文件。校验通过后才重设权限并依次启动 admin 和 public，成功后删除 `.restore-state` 与 `.restore-work`。
+新恢复记录带 `v2:` 前缀，控制文件 `.restore-work/old-dir` 记录 UTC 目录名。续作兼容旧版无前缀记录及其固定旧目录。每次启动前都会运行 `app.restore_guard`：确认 `data/.restore-proof` 与移动目录前固定在数据目录之外的 `.restore-work/expected-proof` 一致，并与数据库中的配置和 Token 指纹一致；没有未完成操作，发布目录只含已启用配置的新 Token 文件。另一轮恢复留下的旧目录即使带有自己的有效指纹也不能通过。不要删除、复制替换或手工伪造这些文件。校验通过后才重设权限并依次启动 admin 和 public，成功后删除 `.restore-state` 与 `.restore-work`。

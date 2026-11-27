@@ -8,7 +8,8 @@ import shutil
 import sqlite3
 import sys
 from pathlib import Path
-from .backups import unpack_verified
+from cryptography.exceptions import InvalidTag
+from .backups import ArchiveFormat, ArchiveLimit, SchemaMismatch, unpack_verified
 from .services import sync_dir
 from .restore_guard import token_fingerprint
 
@@ -79,12 +80,24 @@ def main():
         print(json.dumps(result, ensure_ascii=False))
         success = True
         return 0
+    except InvalidTag:
+        message = '密码错误，或文件已被修改。'
+    except ArchiveLimit:
+        message = '超过 BACKUP_MAX_MIB，请核实大小后用 sudo BACKUP_MAX_MIB=<N> sh scripts/backup.sh 重试。'
+    except ArchiveFormat:
+        message = '不是本程序生成的备份，或文件头已损坏。'
+    except SchemaMismatch:
+        message = '备份与当前程序的数据库结构不兼容。'
+    except OSError:
+        message = '无法读取归档或写入暂存目录，请检查权限和磁盘空间。'
     except Exception:
-        print('备份校验失败：密码错误、归档损坏、格式不支持或存储不可用。', file=sys.stderr)
-        return 1
+        message = '备份损坏或格式不受支持。'
     finally:
         if args.action == 'verify' or not success:
             shutil.rmtree(args.destination, ignore_errors=True)
+
+    print(message, file=sys.stderr)
+    return 1
 
 
 if __name__ == '__main__':

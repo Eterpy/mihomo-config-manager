@@ -1,19 +1,44 @@
 "use strict";
 const $ = (selector) => document.querySelector(selector);
-const csrf = $('meta[name="csrf-token"]').content;
+let csrf = $('meta[name="csrf-token"]').content;
+const changes = typeof BroadcastChannel === "function" ? new BroadcastChannel("mcm") : null;
 let configs = [], ready = false, busy = false, replacement = null, editing = null;
 function notify(message, error = false) {
   const el = $("#notice"); el.textContent = message; el.classList.toggle("error", error); el.hidden = false;
 }
-async function api(path, options = {}) {
+function requireLogin() {
+  $("#login-notice").hidden = false;
+  ready = false;
+  $("#backup-new").disabled = true;
+  for (const button of document.querySelectorAll("#backup-list button, dialog button[type=submit]")) button.disabled = true;
+  render();
+}
+async function api(path, options = {}, retryCsrf = true) {
+  if (!$("#login-notice").hidden && options.method && options.method !== "GET") throw new Error("请重新登录后重试");
   const headers = new Headers(options.headers || {});
   if (options.method && !["GET", "HEAD"].includes(options.method)) headers.set("X-CSRF-Token", csrf);
-  const response = await fetch(path, { ...options, headers, credentials: "same-origin", redirect: "error" });
-  if (!response.ok) {
-    let message = `请求失败（${response.status}），请刷新页面或重新登录`;
-    try { message = (await response.json()).detail || message; } catch (_) { /* no response content logged */ }
-    const error = new Error(message); error.status = response.status; throw error;
+  let response;
+  try {
+    response = await fetch(path, { ...options, headers, credentials: "same-origin", redirect: "error" });
+  } catch (error) {
+    if (error instanceof TypeError) requireLogin();
+    throw error;
   }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    if (response.status === 403 && body.code === "csrf" && retryCsrf) {
+      csrf = (await (await api("/api/csrf", {}, false)).json()).csrf_token;
+      return api(path, options, false);
+    }
+    if (response.status === 401) requireLogin();
+    const message = body.code === "stale" || response.status === 428
+      ? "配置状态已变化，请核对刷新后的内容再提交" : body.detail;
+    const error = new Error(message || `请求失败（${response.status}）`);
+    error.status = response.status;
+    error.code = body.code;
+    throw error;
+  }
+  if (options.method && options.method !== "GET" && !path.endsWith("/subscription-link")) changes?.postMessage("refresh");
   return response;
 }
 function bytes(size) { return size < 1024 ? `${size} B` : size < 1048576 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / 1048576).toFixed(2)} MiB`; }
@@ -48,14 +73,20 @@ function render() {
   $("#no-results").hidden = configs.length === 0 || filtered.length !== 0;
   for (const id of ["#upload-top", "#upload-select"]) $(id).disabled = !ready || busy;
 }
+let loadGeneration = 0;
 async function load() {
+  const generation = ++loadGeneration;
   try {
     const [items, state] = await Promise.all([api("/api/configs").then(r => r.json()), api("/api/status").then(r => r.json())]);
-    configs = items; ready = state.ready && !state.snapshotting;
+    if (generation !== loadGeneration) return;
+    configs = items; ready = state.ready && !state.snapshotting && $("#login-notice").hidden;
     $("#service-status").textContent = state.snapshotting ? "备份快照中" : ready ? "运行正常" : "需要恢复";
     if (state.snapshotting) notify("正在创建一致快照，配置写入暂缓。");
     else if (!ready) notify("存储存在未完成操作。请检查服务器磁盘和权限，然后重启管理端恢复。", true);
-  } catch (error) { ready = false; $("#service-status").textContent = "连接异常"; notify(error.message, true); }
+  } catch (error) {
+    if (generation !== loadGeneration) return;
+    ready = false; $("#service-status").textContent = "连接异常"; notify(error.message, true);
+  }
   render();
 }
 async function mutate(task, message) {
@@ -67,9 +98,11 @@ async function mutate(task, message) {
 }
 async function action(type, config) {
   const base = `/api/configs/${config.id}`;
+  const revision = new URLSearchParams({expected_updated_at: config.updated_at});
   if (type === "copy") {
-    try { await navigator.clipboard.writeText(config.subscription_url); notify("订阅链接已复制，请妥善保管。"); }
-    catch (_) { $("#link-value").value = config.subscription_url; $("#link-dialog").showModal(); $("#link-value").select(); }
+    const {subscription_url} = await (await api(`${base}/subscription-link`, {method: "POST"})).json();
+    try { await navigator.clipboard.writeText(subscription_url); notify("订阅链接已复制，请妥善保管。"); }
+    catch (_) { $("#link-value").value = subscription_url; $("#link-dialog").showModal(); $("#link-value").select(); }
   } else if (type === "history") {
     await showHistory(config);
   } else if (type === "preview") {
@@ -80,11 +113,11 @@ async function action(type, config) {
   } else if (type === "rename") {
     editing = config; $("#rename-name").value = config.name; $("#rename-description").value = config.description; $("#rename-dialog").showModal();
   } else if (type === "toggle") {
-    await mutate(() => api(`${base}/${config.enabled ? "disable" : "enable"}`, { method: "POST" }), config.enabled ? "已停用，订阅链接不可访问。" : "已启用，订阅链接恢复可用。");
+    await mutate(() => api(`${base}/${config.enabled ? "disable" : "enable"}?${revision}`, { method: "POST" }), config.enabled ? "已停用，订阅链接不可访问。" : "已启用，订阅链接恢复可用。");
   } else if (type === "rotate" && window.confirm(`重置「${config.name}」的 Token？\n旧订阅链接将失效，你需要在客户端更新链接。`)) {
-    await mutate(() => api(`${base}/rotate-token`, { method: "POST" }), "Token 已重置。请复制新链接并更新客户端订阅。");
+    await mutate(() => api(`${base}/rotate-token?${revision}`, { method: "POST" }), "Token 已重置，请点击复制新链接。");
   } else if (type === "delete" && window.confirm(`确定删除「${config.name}」？\n订阅立即失效，配置和历史文件将被删除，此操作无法撤销。`)) {
-    await mutate(() => api(base, { method: "DELETE" }), "配置已删除，旧订阅链接已失效。");
+    await mutate(() => api(`${base}?${revision}`, { method: "DELETE" }), "配置已删除，旧订阅链接已失效。");
   }
 }
 function askUploadChoice(dialog) {
@@ -154,6 +187,11 @@ async function uploadFile(file, target) {
       const created = await api("/api/configs", { method: "POST", body: form }).then(response => response.json());
       return `已创建「${created.name}」`;
     } catch (error) {
+      if (error.code === "name_invalid") {
+        nameInput.value = Array.from(nameInput.value || file.name.replace(/\.ya?ml$/i, "")).slice(0, 100).join("");
+        nameMessage = error.message;
+        continue;
+      }
       if (error.status !== 409) throw error;
       nameMessage = `「${file.name}」的显示名称已被使用，请填写其他名称。`;
     }
@@ -185,8 +223,15 @@ for (const button of document.querySelectorAll("[data-close]")) button.addEventL
 $("#rename-form").addEventListener("submit", async e => {
   e.preventDefault(); if (!editing || busy) return;
   const config = editing; $("#rename-dialog").close();
-  await mutate(() => api(`/api/configs/${config.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: $("#rename-name").value, description: $("#rename-description").value }) }), "配置信息已更新。");
+  const fields = {expected_updated_at: config.updated_at};
+  if ($("#rename-name").value !== config.name) fields.name = $("#rename-name").value;
+  if ($("#rename-description").value !== config.description) fields.description = $("#rename-description").value;
+  if (Object.keys(fields).length > 1) await mutate(() => api(`/api/configs/${config.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) }), "配置信息已更新。");
 });
+$("#link-dialog").addEventListener("close", () => { $("#link-value").value = ""; });
+function refreshPage() { load(); loadBackups(); }
+changes?.addEventListener("message", refreshPage);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshPage(); });
 let theme = "system";
 try { theme = localStorage.getItem("mcm-theme") || "system"; } catch (_) { /* storage can be disabled */ }
 function setTheme() { if (!["system", "light", "dark"].includes(theme)) theme = "system"; document.documentElement.dataset.theme = theme; $("#theme").textContent = { system: "跟随系统", light: "浅色模式", dark: "深色模式" }[theme]; }
@@ -222,18 +267,21 @@ let backupTimer;
 async function loadBackups() {
   clearTimeout(backupTimer);
   try {
-    const items = await api("/api/backups").then(r => r.json());
+    const {items, used_bytes, quota_bytes, max_bytes} = await api("/api/backups").then(r => r.json());
+    $("#backup-quota").textContent = `已用 ${bytes(used_bytes)} / 上限 ${bytes(quota_bytes)} · 单次上限 ${bytes(max_bytes)}`;
     const list = $("#backup-list"); list.replaceChildren();
-    const labels = {queued:"等待处理",snapshotting:"创建快照",encrypting:"加密中",ready:"已完成",failed:"失败，请检查存储后重试"};
+    const labels = {queued:"等待处理",snapshotting:"创建快照",encrypting:"加密中",ready:"已完成",failed:"创建失败",unregistered:"未登记的备份文件"};
+    const reasons = {quota_exceeded:"超出备份配额，请删除旧备份",too_large:"超过单次备份上限",disk_space:"磁盘空间不足",storage_error:"存储读写失败",interrupted:"任务已中断",archive_missing:"归档缺失",archive_corrupt:"归档校验失败"};
     for (const item of items) {
       const row = document.createElement("article"); row.className = "history-row";
       const text = document.createElement("p"); text.textContent = `${new Date(item.created_at).toLocaleString()} · ${labels[item.status]} · ${bytes(item.size)}${item.sha256 ? `\nSHA-256：${item.sha256}` : ""}`; row.append(text);
+      if (item.error_code || item.filename) text.append(" · ", item.filename || reasons[item.error_code] || "请检查存储");
       if (item.status === "ready") { const a = document.createElement("a"); a.textContent = "下载加密备份"; a.href = `/api/backups/${item.id}/download`; a.download = ""; row.append(a); }
-      if (["ready","failed"].includes(item.status)) { const b = document.createElement("button"); b.textContent = "删除"; b.onclick = async () => { if (!confirm("删除服务器上的这份备份？已下载的副本不受影响。")) return; try { await api(`/api/backups/${item.id}`, {method:"DELETE"}); await loadBackups(); } catch(e) {notify(e.message,true);} }; row.append(b); }
+      if (["ready","failed","unregistered"].includes(item.status)) { const b = document.createElement("button"); b.textContent = "删除"; b.onclick = async () => { if (!confirm("删除服务器上的这份备份？已下载的副本不受影响。")) return; try { await api(`/api/backups/${item.id}`, {method:"DELETE"}); await loadBackups(); } catch(e) {notify(e.message,true);} }; row.append(b); }
       list.append(row);
     }
-    const active = items.some(i => !["ready","failed"].includes(i.status));
-    $("#backup-new").disabled = active;
+    const active = items.some(i => !["ready","failed","unregistered"].includes(i.status));
+    $("#backup-new").disabled = active || !$("#login-notice").hidden;
     if (active) backupTimer = setTimeout(() => {loadBackups(); load();}, 2000);
   } catch(e) {notify(e.message,true);}
 }

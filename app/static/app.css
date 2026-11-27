@@ -413,6 +413,7 @@ main {
   margin:8px 0
 }
 .card-actions {
+  flex-wrap:wrap;
   display:flex;
   gap:8px
 }
@@ -432,6 +433,7 @@ main {
   font-weight:600
 }
 .card-secondary {
+  flex-wrap:wrap;
   border-top:1px solid var(--line);
   margin-top:18px;
   padding-top:11px;
@@ -547,6 +549,7 @@ dialog::backdrop {
   margin-top:10px
 }
 .upload-dialog .dialog-footer {
+  flex-wrap:wrap;
   justify-content:flex-start;
   flex-wrap:wrap
 }
@@ -677,6 +680,10 @@ dialog::backdrop {
     width:36px;
     height:36px
   }
+}
+@media(max-width:420px) {
+  .card-actions .copy-button { flex:1 1 100% }
+  .card-actions button:not(.copy-button) { flex:1 1 0; min-width:0 }
 }
 @media(prefers-reduced-motion:reduce) {
   * {

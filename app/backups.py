@@ -1,5 +1,7 @@
 """Versioned authenticated archives. Never parse unauthenticated plaintext."""
 import concurrent.futures
+import errno
+from contextlib import contextmanager
 import gzip
 import hashlib
 import json
@@ -7,12 +9,13 @@ import os
 import secrets
 import shutil
 import sqlite3
+import stat
 import tarfile
 import tempfile
 import threading
 import uuid
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
@@ -23,6 +26,29 @@ from .services import atomic_copy, digest, now, sync_dir
 MAGIC = b'MCMBAK01'
 HEADER = 36
 CHUNK = 65536
+
+
+class ArchiveLimit(ValueError):
+    pass
+
+
+class ArchiveFormat(ValueError):
+    pass
+
+
+class SchemaMismatch(ValueError):
+    pass
+
+
+class BackupFailure(ValueError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def tar_bytes(sizes):
+    blocks = 2 + sum(1 + (size + 511) // 512 for size in sizes)
+    return ((blocks + 19) // 20) * 10240
 
 
 def key(password, salt):
@@ -39,7 +65,7 @@ def encrypt(source, destination, password, limit):
         while block := src.read(CHUNK):
             out.write(ctx.update(block))
             if out.tell() + 16 > limit:
-                raise ValueError('quota')
+                raise BackupFailure('quota_exceeded')
         out.write(ctx.finalize() + ctx.tag)
         out.flush()
         os.fsync(out.fileno())
@@ -49,11 +75,13 @@ def decrypt(source, destination, password, limit):
     with open(source, 'rb') as src, open(destination, 'xb') as out:
         os.chmod(destination, 0o600)
         size = os.fstat(src.fileno()).st_size
-        if size < HEADER + 16 or size > limit + 16 * 1024 * 1024:
-            raise ValueError('size')
+        if size < HEADER + 16:
+            raise ArchiveFormat('format')
+        if size > limit + 16 * 1024 * 1024:
+            raise ArchiveLimit('size')
         header = src.read(HEADER)
         if header[:8] != MAGIC:
-            raise ValueError('format')
+            raise ArchiveFormat('format')
         src.seek(-16, 2)
         tag = src.read(16)
         src.seek(HEADER)
@@ -88,7 +116,7 @@ class BoundedReader:
         data = self.stream.read(min(size, self.remaining + 1))
         self.remaining -= len(data)
         if self.remaining < 0:
-            raise ValueError('archive expansion')
+            raise ArchiveLimit('archive expansion')
         return data
 
 
@@ -115,7 +143,7 @@ def unpack_verified(archive, password, destination, limit=1024**3):
                 seen.add(name)
                 total += entry.size
                 if total > limit or len(seen) > 100000 or (name == 'manifest.json' and entry.size > 16 * 1024 * 1024):
-                    raise ValueError('expanded size')
+                    raise ArchiveLimit('expanded size')
                 target = destination / name
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 with tar.extractfile(entry) as src, target.open('xb') as out:
@@ -135,8 +163,13 @@ def unpack_verified(archive, password, destination, limit=1024**3):
     con = sqlite3.connect(f'{db.as_uri()}?mode=ro', uri=True)
     try:
         con.execute('PRAGMA trusted_schema=OFF')
-        validate_schema(con)
-        if con.execute('PRAGMA user_version').fetchone()[0] != 2 or con.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or con.execute('PRAGMA foreign_key_check').fetchone():
+        try:
+            validate_schema(con)
+        except ValueError:
+            raise SchemaMismatch('schema') from None
+        if con.execute('PRAGMA user_version').fetchone()[0] != 2:
+            raise SchemaMismatch('schema')
+        if con.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or con.execute('PRAGMA foreign_key_check').fetchone():
             raise ValueError('database')
         configs = con.execute('SELECT id,token,status,version,size,sha256,enabled FROM configs').fetchall()
         versions = con.execute('SELECT config_id,version,size,sha256 FROM versions').fetchall()
@@ -174,25 +207,53 @@ class Backups:
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         with store.db.connect() as con:
             con.execute("UPDATE backup_jobs SET status='failed',error_code='interrupted' WHERE status NOT IN ('ready','failed')")
-            ready = {r[0] + '.mcmbackup' for r in con.execute("SELECT id FROM backup_jobs WHERE status='ready'")}
+        self.archive_lock = threading.RLock()
         for path in self.root.iterdir():
-            if path.name not in ready or path.is_symlink():
-                if path.is_dir() and not path.is_symlink():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
+            if path.is_symlink():
+                path.unlink()
+            elif path.name.startswith('.work-') and path.is_dir():
+                shutil.rmtree(path)
+        self.list()
 
     @staticmethod
     def check_size(size, limit):
         if size > limit:
-            raise ValueError("size")
+            raise ArchiveLimit('size')
 
     def close(self):
         self.pool.shutdown(wait=True)
 
+    def archives(self):
+        return [p for p in self.root.glob('*.mcmbackup') if not p.is_symlink() and p.is_file()]
+
+    @staticmethod
+    def unregistered_id(path):
+        return 'file-' + hashlib.sha256(os.fsencode(path.name)).hexdigest()
+
     def list(self):
-        with self.store.db.connect() as con:
-            return [dict(r) for r in con.execute('SELECT * FROM backup_jobs ORDER BY created_at DESC')]
+        with self.archive_lock, self.store.db.connect() as con:
+            files = {path.name: path for path in self.archives()}
+            used = sum(p.stat().st_size for p in files.values())
+            items = [dict(r) for r in con.execute('SELECT * FROM backup_jobs ORDER BY created_at DESC')]
+            for item in items:
+                path = files.pop(item['id'] + '.mcmbackup', None)
+                if item['status'] != 'ready':
+                    continue
+                code = None
+                if path is None:
+                    code = 'archive_missing'
+                elif path.stat().st_size != item['size']:
+                    code = 'archive_corrupt'
+                if code:
+                    con.execute("UPDATE backup_jobs SET status='failed', error_code=? WHERE id=?", (code, item['id']))
+                    item.update(status='failed', error_code=code)
+            for path in files.values():
+                info = path.stat()
+                items.append({'id': self.unregistered_id(path), 'filename': path.name, 'status': 'unregistered',
+                              'created_at': datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat(),
+                              'size': info.st_size, 'sha256': None, 'error_code': None})
+            return {'items': items, 'used_bytes': used, 'quota_bytes': self.store.settings.backup_quota_bytes,
+                    'max_bytes': self.store.settings.backup_max_bytes}
 
     def get(self, ident):
         with self.store.db.connect() as con:
@@ -236,15 +297,18 @@ class Backups:
                     with self.store.db.connect() as con:
                         rows = con.execute('SELECT * FROM versions').fetchall()
                         total = sum(r['size'] for r in rows) + self.store.db.path.stat().st_size
-                        used = sum(p.stat().st_size for p in self.root.glob('*.mcmbackup'))
+                        used = sum(p.stat().st_size for p in self.archives())
                         limit = self.store.settings.backup_max_bytes
                         quota = self.store.settings.backup_quota_bytes - used
-                        if len(rows) > 50000 or total > limit or quota < total + 1024*1024 or shutil.disk_usage(self.root).free < total * 3 + 64*1024*1024:
-                            raise ValueError('space')
+                        if len(rows) > 50000 or tar_bytes([self.store.db.path.stat().st_size, *(r['size'] for r in rows)]) > limit:
+                            raise ArchiveLimit('size')
+                        if shutil.disk_usage(self.root).free < total * 3 + 16 * 1024**2:
+                            raise BackupFailure('disk_space')
                         (snapshot / 'db').mkdir(mode=0o700)
                         target = sqlite3.connect(snapshot / 'db/manager.sqlite3')
                         try:
-                            con.backup(target, pages=256, progress=lambda status, remaining, pages: self.check_size(pages * 4096, limit))
+                            page_size = con.execute("PRAGMA page_size").fetchone()[0]
+                            con.backup(target, pages=256, progress=lambda status, remaining, pages: self.check_size(pages * page_size, limit))
                         finally:
                             target.close()
                         (snapshot / 'db/manager.sqlite3').chmod(0o600)
@@ -258,8 +322,7 @@ class Backups:
             files = {p.relative_to(snapshot).as_posix(): {'size': p.stat().st_size, 'sha256': digest(p)} for p in snapshot.rglob('*') if p.is_file()}
             manifest = {'format': 1, 'created_at': now(), 'files': files}
             (snapshot / 'manifest.json').write_text(json.dumps(manifest))
-            if sum(p.stat().st_size for p in snapshot.rglob('*') if p.is_file()) > limit:
-                raise ValueError('size')
+            self.check_size(tar_bytes(p.stat().st_size for p in snapshot.rglob('*') if p.is_file()), limit)
             archive = work / 'archive.tar.gz'
             with tarfile.open(archive, 'w:gz', format=tarfile.USTAR_FORMAT) as tar:
                 for name in [*files, 'manifest.json']:
@@ -267,31 +330,74 @@ class Backups:
             encrypted = work / 'encrypted'
             encrypt(archive, encrypted, password, quota)
             sha, size = digest(encrypted), encrypted.stat().st_size
-            os.replace(encrypted, output)
-            sync_dir(self.root)
-            self.update(ident, 'ready', size=size, sha256=sha)
-        except Exception:
+            with self.archive_lock:
+                os.replace(encrypted, output)
+                sync_dir(self.root)
+                self.update(ident, 'ready', size=size, sha256=sha)
+        except Exception as exc:
             output.unlink(missing_ok=True)
-            self.update(ident, 'failed', error_code='backup_failed')
+            code = 'storage_error'
+            if isinstance(exc, BackupFailure):
+                code = exc.code
+            elif isinstance(exc, ArchiveLimit):
+                code = 'too_large'
+            elif isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+                code = 'disk_space'
+            self.update(ident, 'failed', error_code=code)
         finally:
             password = None
             shutil.rmtree(work, ignore_errors=True)
             self.gate.release()
 
+    @contextmanager
     def download(self, ident):
-        row = self.get(ident)
-        if row['status'] != 'ready':
-            raise AppError(409, '备份尚未完成')
-        path = self.root / (ident + '.mcmbackup')
-        if path.is_symlink() or not path.is_file():
-            raise AppError(503, '备份文件不可用')
-        return path
+        with self.archive_lock:
+            row = self.get(ident)
+            if row['status'] != 'ready':
+                raise AppError(409, '备份不可下载')
+            path = self.root / (ident + '.mcmbackup')
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                self.update(ident, 'failed', error_code='archive_missing')
+                raise AppError(409, '备份归档缺失') from None
+            except OSError as exc:
+                if exc.errno != errno.ELOOP:
+                    raise
+                self.update(ident, 'failed', error_code='archive_corrupt')
+                raise AppError(409, '备份归档异常') from None
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size != row['size']:
+                os.close(fd)
+                self.update(ident, 'failed', error_code='archive_corrupt')
+                raise AppError(409, '备份完整性校验失败')
+            archive = os.fdopen(fd, 'rb')
+            try:
+                if hashlib.file_digest(archive, 'sha256').hexdigest() != row['sha256']:
+                    self.update(ident, 'failed', error_code='archive_corrupt')
+                    raise AppError(409, '备份完整性校验失败')
+                archive.seek(0)
+            except BaseException:
+                archive.close()
+                raise
+        # Serve this verified inode even if another admin deletes its directory entry.
+        with archive:
+            yield archive
 
     def delete(self, ident):
-        row = self.get(ident)
-        if row['status'] not in {'ready', 'failed'}:
-            raise AppError(409, '任务进行中，不能删除')
-        (self.root / (ident + '.mcmbackup')).unlink(missing_ok=True)
-        sync_dir(self.root)
-        with self.store.db.connect() as con:
+        with self.archive_lock, self.store.db.connect() as con:
+            if ident.startswith('file-'):
+                for path in self.archives():
+                    if self.unregistered_id(path) == ident and not con.execute(
+                        'SELECT 1 FROM backup_jobs WHERE id=?', (path.stem,)
+                    ).fetchone():
+                        path.unlink()
+                        sync_dir(self.root)
+                        return
+                raise AppError(404, '未登记的备份不存在')
+            row = self.get(ident)
+            if row['status'] not in {'ready', 'failed'}:
+                raise AppError(409, '任务进行中，不能删除')
+            (self.root / (str(uuid.UUID(ident)) + '.mcmbackup')).unlink(missing_ok=True)
+            sync_dir(self.root)
             con.execute('DELETE FROM backup_jobs WHERE id=?', (ident,))

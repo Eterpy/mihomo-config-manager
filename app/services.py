@@ -1,3 +1,4 @@
+from contextlib import closing
 import fcntl
 import hashlib
 import logging
@@ -9,11 +10,11 @@ import sqlite3
 import tempfile
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .database import Database
-from .errors import AppError
+from .errors import AppError, MissingDatabase
 from .settings import Settings
 from .validation import display_name
 
@@ -23,6 +24,12 @@ TOKEN = re.compile(r"[0-9a-f]{64}")
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def next_update(previous):
+    current = datetime.now(timezone.utc)
+    last = datetime.fromisoformat(previous)
+    return max(current, last + timedelta(microseconds=1)).isoformat()
 
 
 def digest(path):
@@ -74,7 +81,26 @@ class Store:
         self._lockfile = (self.root / "db" / ".writer.lock").open("a")
         try:
             fcntl.flock(self._lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.db = Database(self.root / "db" / "manager.sqlite3")
+            path = self.root / "db" / "manager.sqlite3"
+            marker = path.with_name(".initialized")
+            if path.is_symlink() or marker.is_symlink():
+                raise RuntimeError("数据库路径异常")
+            version = 0
+            if path.exists():
+                with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as con:
+                    version = con.execute("PRAGMA user_version").fetchone()[0]
+            backups = self.root / "backups"
+            if not version and (marker.exists() or any(p != self.incoming for p in self.private.iterdir())
+                                or any(self.published.iterdir()) or backups.is_symlink()
+                                or (backups.exists() and any(backups.iterdir()))
+                                or any(path.parent.glob("manager.sqlite3-*"))):
+                raise MissingDatabase("数据库缺失或未初始化，数据目录中仍有记录。已停止启动，请从加密备份恢复或人工核查。")
+            self.db = Database(path)
+            if not marker.exists():
+                with marker.open("xb") as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    os.fsync(stream.fileno())
+                sync_dir(path.parent)
             self.recover()
         except Exception:
             self.close()
@@ -93,10 +119,18 @@ class Store:
 
     def _view(self, row):
         row = dict(row)
-        token = row.pop("token")
+        row.pop("token")
         row["enabled"] = bool(row["enabled"])
-        row["subscription_url"] = f"{self.settings.public_base_url}/s/{token}/profile.yaml"
         return row
+
+    def subscription_url(self, config_id):
+        with self.lock, self.db.connect() as con:
+            token = self._row(con, config_id)["token"]
+            return f"{self.settings.public_base_url}/s/{token}/profile.yaml"
+
+    def check_revision(self, row, field, expected):
+        if row[field] != expected:
+            raise AppError(409, "配置已在其他页面修改，请刷新后重试", code="stale", current=self._view(row))
 
     def list(self):
         with self.lock, self.db.connect() as con:
@@ -213,15 +247,25 @@ class Store:
                         raise OSError("private version integrity failure")
                 self._prune(row["id"])
             known = {r["id"] for r in rows}
+            isolated = 0
             for directory in self.private.iterdir():
                 if directory.name == ".incoming":
                     for file in directory.iterdir():
                         file.unlink()
                 elif directory.name not in known:
-                    if directory.is_symlink() or directory.is_file():
-                        directory.unlink()
-                    else:
-                        shutil.rmtree(directory)
+                    quarantine = self.root / "quarantine"
+                    if quarantine.is_symlink():
+                        raise RuntimeError("隔离目录异常")
+                    quarantine.mkdir(mode=0o700, exist_ok=True)
+                    dest = tempfile.mkdtemp(prefix=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-"), dir=quarantine)
+                    directory.rename(Path(dest) / directory.name)
+                    sync_dir(Path(dest))
+                    sync_dir(quarantine)
+                    sync_dir(self.private)
+                    sync_dir(self.root)
+                    isolated += 1
+            if isolated:
+                log.warning("private_entries_quarantined count=%d", isolated)
             self.failed = False
             self.ready = True
 
@@ -260,9 +304,9 @@ class Store:
             try:
                 with self.db.connect() as con:
                     row = self._row(con, config_id)
-                    if expected_current_version is not None and row["version"] != expected_current_version:
-                        raise AppError(409, "当前版本已变化，请重新选择文件并确认要更新的版本")
-                    version, stamp = row["version"] + 1, now()
+                    if expected_current_version is not None:
+                        self.check_revision(row, "version", expected_current_version)
+                    version, stamp = row["version"] + 1, next_update(row["updated_at"])
                     self._store_version(source, config_id, version)
                     size, sha = source.stat().st_size, digest(source)
                     con.execute("INSERT INTO versions (config_id,version,filename,size,sha256,created_at,source_version) VALUES (?, ?, ?, ?, ?, ?, ?)", (config_id, version, filename, size, sha, stamp, source_version))
@@ -274,16 +318,18 @@ class Store:
             self._complete(config_id)
             return self.get(config_id)
 
-    def change(self, config_id, action):
+    def change(self, config_id, action, expected_updated_at=None):
         with self.lock:
             self._writable()
             try:
                 with self.db.connect() as con:
                     row = self._row(con, config_id)
+                    if expected_updated_at is not None:
+                        self.check_revision(row, "updated_at", expected_updated_at)
                     token = self._new_token(con) if action == "rotate-token" else row["token"]
                     enabled = action == "enable" if action in {"enable", "disable"} else row["enabled"]
                     state = "deleting" if action == "delete" else "pending"
-                    con.execute("UPDATE configs SET token=?, enabled=?, status=?, updated_at=? WHERE id=?", (token, int(enabled), state, now(), config_id))
+                    con.execute("UPDATE configs SET token=?, enabled=?, status=?, updated_at=? WHERE id=?", (token, int(enabled), state, next_update(row["updated_at"]), config_id))
                     con.execute("INSERT INTO operations VALUES (?, ?)", (config_id, row["token"] if action == "rotate-token" else None))
             except sqlite3.Error:
                 self.failed = True
@@ -291,13 +337,15 @@ class Store:
             self._complete(config_id)
             return None if action == "delete" else self.get(config_id)
 
-    def rename(self, config_id, name=None, description=None):
+    def rename(self, config_id, name=None, description=None, expected_updated_at=None):
         with self.lock:
             self._writable()
             try:
                 with self.db.connect() as con:
                     row = self._row(con, config_id)
-                    con.execute("UPDATE configs SET name=?, description=?, updated_at=? WHERE id=?", (display_name(name) if name is not None else row["name"], description if description is not None else row["description"], now(), config_id))
+                    if expected_updated_at is not None:
+                        self.check_revision(row, "updated_at", expected_updated_at)
+                    con.execute("UPDATE configs SET name=?, description=?, updated_at=? WHERE id=?", (display_name(name) if name is not None else row["name"], description if description is not None else row["description"], next_update(row["updated_at"]), config_id))
             except sqlite3.IntegrityError:
                 raise AppError(409, "显示名称已存在，请修改名称") from None
             except sqlite3.Error:
@@ -333,7 +381,9 @@ class Store:
         with self.lock:
             self._writable()
             current = self.get(config_id)
-            if current["version"] != expected or version == current["version"]:
+            if current["version"] != expected:
+                raise AppError(409, "配置已在其他页面修改，请刷新后重试", code="stale", current=current)
+            if version == current["version"]:
                 raise AppError(409, "当前版本已变化或目标就是当前版本，请刷新")
             path, row = self.historical(config_id, version)
             return self.replace(config_id, path, row["filename"], version)

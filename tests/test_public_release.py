@@ -1,5 +1,6 @@
 """Use constructed synthetic markers, never production credentials."""
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -111,6 +112,23 @@ def test_git_index_checked_even_if_worktree_is_clean(tmp_path):
     source.write_bytes(original)
     (tmp_path / '.env').write_text('synthetic fixture')
     git('add', '-f', '.env')
+    marker = 'a' * 64
+    filename = tmp_path / 'data/published' / (marker + '.yaml')
+    filename.parent.mkdir(parents=True)
+    filename.write_bytes(b'synthetic')
+    git('add', '-f', str(filename.relative_to(tmp_path)))
+    command = subprocess.run([sys.executable, str(tmp_path / 'scripts/check_public.py'), '--staged'],
+                             capture_output=True, text=True)
+    assert command.returncode == 1
+    assert marker not in command.stdout + command.stderr
+    assert 'aaaa…' in command.stdout
     problems = check(tmp_path, staged=True)[1]
     assert any(p[0] == '.env' for p in problems)
     assert any(p[0] == 'app/__init__.py' and p[2] == 'subscription credential' for p in problems)
+
+def test_bare_token_detection_excludes_labelled_digests():
+    marker = b'ab' * 32
+    assert content_findings('docs/test.md', marker)
+    assert content_findings('docs/test.md', b'/s/' + marker)
+    for prefix in (b'--hash=sha256:', b'sha256=', b'@sha256:'):
+        assert not content_findings('requirements.txt', prefix + marker)

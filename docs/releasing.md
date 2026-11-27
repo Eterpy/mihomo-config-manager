@@ -11,7 +11,7 @@ python3 scripts/package_release.py /tmp/yaml-config-manager-source.tar.gz
 
 打包工具只收录指定文件和源码扩展名，拒绝符号链接与硬链接，并在写包前执行常见秘密模式检查。输出独占创建，已有包不会覆盖。归档不包含本地 `.git`、虚拟环境、缓存、`.env`、运行数据和备份；归档成员清除本机所有者与修改时间。
 
-不要整目录打包或压缩部署目录：其中的 `data`、`data.before-restore`、`.restore-work` 和环境文件都含 Token 或凭据。源码包也不是数据备份，不能用于恢复订阅。
+不要整目录打包或压缩部署目录：其中的 `data`、`data.before-restore*`、`.restore-work` 和环境文件都含 Token 或凭据。源码包也不是数据备份，不能用于恢复订阅。
 
 `check_public.py` 默认检查白名单源码和 Git 尚未忽略的文件（有 Git 时），`--staged` 检查索引中全部文件及其实际内容，包括被强制暂存的文件。检查无命中仍需人工审阅域名、账号、注释和截图；它不能检测所有秘密。
 

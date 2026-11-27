@@ -1,7 +1,7 @@
 def test_current_plus_five_history(upload, client, application):
     item = upload().json()
     for version in range(2, 9):
-        response = client.put(f'/api/configs/{item["id"]}/content', files={"file": ("x.yaml", f"value: {version}\n".encode())})
+        response = client.put(f'/api/configs/{item["id"]}/content', params={'expected_current_version': version - 1}, files={"file": ("x.yaml", f"value: {version}\n".encode())})
         assert response.status_code == 200
         assert response.json()["version"] == version
     directory = application.state.store.private / item["id"] / "versions"

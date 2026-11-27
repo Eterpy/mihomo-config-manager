@@ -30,6 +30,7 @@ SECRET_PATTERNS = {
     'GitHub token': rb'\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})\b',
     'AWS access key': rb'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b',
     'JWT': rb'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b',
+    'possible subscription token': rb'(?<!sha256:)(?<!sha256=)\b[0-9a-f]{64}\b',
     'subscription credential': rb'/s/[0-9a-fA-F]{64}/profile\.yaml',
     'URL credentials': rb'https?://[^\s/<>"\x27]+:[^\s/<>"\x27]+@',
     'personal home path': rb'/(?:Users|home)/[A-Za-z0-9_.-]+/',

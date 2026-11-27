@@ -36,8 +36,8 @@ chmod 600 .env
 | `HISTORY_VERSIONS` | `5`；当前版本以外的保留数量，范围 0–100 |
 | `YAML_TIMEOUT_SECONDS` | `5`；大于 0 且不超过 30 |
 | `YAML_MEMORY_MIB` | `256`；范围 64–1024，Linux 解析子进程使用 RLIMIT_AS |
-| `BACKUP_MAX_MIB` | `1024`；单次备份内容上限 |
-| `BACKUP_QUOTA_MIB` | `2048`；已完成备份的总容量上限，不小于单次上限；两者最大 102400 |
+| `BACKUP_MAX_MIB` | `1024`；单次未压缩 tar 归档大小上限 |
+| `BACKUP_QUOTA_MIB` | `2048`；在盘加密归档的实际字节总量上限，不小于单次上限；两者最大 102400 |
 | `DATA_DIR` | Compose 固定为 `/data`；直接运行时默认为工作目录下的 `data` |
 
 示例值、缺失的域名或认证参数都会让 admin 拒绝启动；`APP_ENV=development` 同样需要真实认证参数。直接用 Uvicorn 启动时，须由调用环境提供变量：应用不会自动加载 `.env`，Compose 会加载。

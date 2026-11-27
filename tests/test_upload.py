@@ -1,3 +1,4 @@
+from tests.helpers import link
 import hashlib
 import re
 import subprocess
@@ -9,11 +10,11 @@ from app.validation import validate_yaml
 
 
 @pytest.mark.parametrize("content", [b"# comment\nproxies: []\n", b"\xef\xbb\xbf# BOM\r\nproxies: []\r\n", '说明: 中文\nproxies: []\n'.encode()])
-def test_original_bytes(upload, application, content):
+def test_original_bytes(upload, application, content, client):
     response = upload(content)
     assert response.status_code == 201, response.text
     item = response.json()
-    token = item["subscription_url"].split("/")[-2]
+    token = link(client, item).split("/")[-2]
     assert re.fullmatch("[0-9a-f]{64}", token)
     assert item["sha256"] == hashlib.sha256(content).hexdigest()
     assert (application.state.store.published / f"{token}.yaml").read_bytes() == content
@@ -47,9 +48,10 @@ def test_update_confirmed_version_of_selected_config(upload, client):
     second = upload(filename="config.yaml", name="测试").json()
     base = f'/api/configs/{second["id"]}'
     url = base + "/content?expected_current_version=1"
+    old_link = link(client, second)
     updated = client.put(url, files={"file": ("config.yaml", b"value: 2\n")})
     assert updated.status_code == 200
-    assert updated.json()["subscription_url"] == second["subscription_url"]
+    assert link(client, updated.json()) == old_link
     assert updated.json()["version"] == 2
 
     stale = client.put(url, files={"file": ("config.yaml", b"value: stale\n")})

@@ -54,6 +54,12 @@ for script in scripts/*.sh; do sh -n "$script"; done
 
 Node 仅用于语法检查，生产不需要。发布检查应与人工审查、Git 历史检查配合，不代表完整的秘密扫描。
 
+## 手机布局与多标签验收
+
+在本地临时预览中使用 Chromium 的手机设备模拟，分别设为 320、360、390、414 CSS 像素宽。检查配置卡片上的按钮都在卡片边框内，两行按钮的 `scrollWidth` 不超过 `clientWidth`，且整页 `document.documentElement.scrollWidth` 等于模拟视口宽度。打开历史和预览对话框检查内容滚动。
+
+在两个同源标签页中打开同一配置的修改对话框，在第二页先保存说明，再提交第一页的旧表单。第一页应提示核对已刷新的状态，第二页写入的说明仍可见。打开配置列表时不请求订阅凭据，点击复制才调用链接接口。
+
 ## 未覆盖的范围
 
 以下内容无法由仓库内测试验证，需要部署者在目标环境验收：
@@ -68,6 +74,10 @@ Node 仅用于语法检查，生产不需要。发布检查应与人工审查、
 
 | 日期 | 环境 | 检查 | 结果 |
 |---|---|---|---|
+| 2026-11-28 | macOS，Python 3.14，0.4.0 | 非容器测试、真实本机 Nginx HTTP、依赖与语法、Compose 配置 | 205 passed、1 skipped（Linux 内存限制）；HTTP 6 passed |
+| 2026-11-28 | Chromium 手机模拟与同源标签页 | 四种手机宽度、按需复制、并发改名、CSRF 续期和标签页刷新 | 通过 |
+| 2026-11-28 | 0.3.1 → 0.4.0 | 从旧提交生成加密归档，运行新版离线准备和存储启动 | 配置、两个版本、停用状态均保留，Token 已轮换 |
+| 2026-11-28 | macOS，0.4.0 | Linux Docker 隔离验收 | 本机没有 Docker，未执行；恢复脚本停服前检查、中断清理与续作已使用桩命令验证 |
 | 2026-11-18 | macOS，Python 3.14，0.3.1 版本号更新后 | 全量 Python 测试；恢复相关测试另以 dash 运行；Shell / JS 语法；发布检查与源码打包 | 通过；158 passed、1 skipped（RLIMIT_AS）；dash 下 61 passed；70 个文件无规则命中 |
 | 2026-11-18 | GitHub Actions，`main` 提交 `0a9d283`（与 0.3.1 仅差版本号） | `source-and-tests` / `containers` | 通过；159 passed；容器内 155 passed，HTTP 6 passed |
 | 2026-11-18 | GitHub Actions，`main` 提交 `f71f175` | `source-and-tests`：发布检查、全量 Python 测试、语法与依赖检查、源码打包 | 通过；156 passed（Linux 上含 RLIMIT_AS 测试） |

@@ -7,9 +7,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.openapi.utils import get_openapi
@@ -19,10 +19,10 @@ from starlette.exceptions import HTTPException
 
 from .backups import Backups
 from .auth import AccessVerifier, CSRF, SecurityBoundary
-from .errors import AppError
+from .errors import AppError, MissingDatabase
 from .services import Store
 from .settings import Settings
-from .validation import filename_valid, validate_yaml
+from .validation import check_filename_chars, filename_valid, validate_yaml
 
 BASE = Path(__file__).parent
 
@@ -36,6 +36,7 @@ class BackupCreate(BaseModel):
 
 
 class Rename(BaseModel):
+    expected_updated_at: str
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=2000)
@@ -53,7 +54,6 @@ class ConfigView(BaseModel):
     status: str
     created_at: str
     updated_at: str
-    subscription_url: str
 
 
 UPLOAD_SCHEMA = {"requestBody": {"required": True, "content": {"multipart/form-data": {"schema": {"type": "object", "required": ["file"], "properties": {"file": {"type": "string", "format": "binary"}, "name": {"type": "string", "maxLength": 100}, "description": {"type": "string", "maxLength": 2000}}}}}}}
@@ -61,7 +61,7 @@ UPLOAD_SCHEMA = {"requestBody": {"required": True, "content": {"multipart/form-d
 
 def create_app(settings=None, verifier=None):
     settings = settings or Settings.from_env()
-    csrf = CSRF(secure=settings.admin_scheme == "https")
+    csrf = CSRF()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -69,7 +69,11 @@ def create_app(settings=None, verifier=None):
         try:
             app.state.store = await asyncio.to_thread(Store, settings)
             app.state.backups = await asyncio.to_thread(Backups, app.state.store)
+        except MissingDatabase:
+            raise
         except Exception:
+            if hasattr(app.state, "store"):
+                app.state.store.close()
             raise RuntimeError("存储初始化或恢复失败，请检查磁盘、权限、数据库版本与单实例限制") from None
         try:
             yield
@@ -77,7 +81,7 @@ def create_app(settings=None, verifier=None):
             await asyncio.to_thread(app.state.backups.close)
             await asyncio.to_thread(app.state.store.close)
 
-    app = FastAPI(title="YAML Config Manager", version="0.3.1", lifespan=lifespan, docs_url=None, redoc_url=None,
+    app = FastAPI(title="YAML Config Manager", version="0.4.0", lifespan=lifespan, docs_url=None, redoc_url=None,
                   telemetry={"auto_configure": False, "tracing": False, "metrics": False, "logs": False, "operation_spans": False})
     app.state.settings = settings
     app.state.csrf = csrf
@@ -87,10 +91,17 @@ def create_app(settings=None, verifier=None):
 
     @app.exception_handler(AppError)
     async def app_error(request, exc):
-        return JSONResponse({"detail": exc.message}, status_code=exc.status)
+        return JSONResponse(exc.body, status_code=exc.status)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
+        for err in exc.errors():
+            if err["type"] != "missing":
+                continue
+            missing_revision = err["loc"][-1] in {"expected_updated_at", "expected_current_version"}
+            missing_body = err["loc"] == ("body",) and request.scope["route"].name in {"rename", "rollback"}
+            if missing_revision or missing_body:
+                return JSONResponse({"detail": "缺少版本条件，请刷新页面后重试", "code": "precondition"}, status_code=428)
         return JSONResponse({"detail": "请求参数不合法，请检查字段类型、长度与配置 ID"}, status_code=422)
 
     @app.exception_handler(HTTPException)
@@ -101,9 +112,11 @@ def create_app(settings=None, verifier=None):
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     async def index(request: Request):
         token = csrf.issue(request.state.identity["sub"])
-        response = templates.TemplateResponse(request=request, name="index.html", context={"csrf_token": token, "max_mib": settings.max_upload_bytes // 1048576})
-        response.set_cookie(csrf.cookie_name, token, max_age=3600, secure=csrf.secure, httponly=True, samesite="strict", path="/")
-        return response
+        return templates.TemplateResponse(request=request, name="index.html", context={"csrf_token": token, "max_mib": settings.max_upload_bytes // 1048576})
+
+    @app.get("/api/csrf")
+    async def refresh_csrf(request: Request):
+        return {"csrf_token": csrf.issue(request.state.identity["sub"])}
 
     @app.get("/healthz", include_in_schema=False)
     async def health():
@@ -135,9 +148,9 @@ def create_app(settings=None, verifier=None):
             if isinstance(original_name, tuple):
                 original_name = collapse_rfc2231_value(original_name)
             if original_name is not None:
-                filename_valid(original_name)
+                check_filename_chars(original_name)
             filename = filename_valid(file.filename)
-            name = form.get("name", Path(filename).stem)
+            name = form.get("name", Path(filename).stem.strip()[:100] or filename.strip()[:100] or "未命名配置")
             description = form.get("description", "")
             if not isinstance(name, str) or not isinstance(description, str) or len(description) > 2000:
                 raise AppError(422, "名称或说明格式错误，说明最长 2000 个字符")
@@ -169,34 +182,39 @@ def create_app(settings=None, verifier=None):
     async def get(config_id: UUID):
         return await asyncio.to_thread(app.state.store.get, str(config_id))
 
+    @app.post("/api/configs/{config_id}/subscription-link")
+    async def subscription_link(config_id: UUID):
+        url = await asyncio.to_thread(app.state.store.subscription_url, str(config_id))
+        return {"subscription_url": url}
+
     @app.get("/api/configs/{config_id}/preview", response_class=Response)
     async def preview(config_id: UUID):
         data = await asyncio.to_thread(app.state.store.preview, str(config_id))
         return Response(data, media_type="text/plain; charset=utf-8")
 
     @app.put("/api/configs/{config_id}/content", response_model=ConfigView, openapi_extra={"requestBody": {"required": True, "content": {"multipart/form-data": {"schema": {"type": "object", "required": ["file"], "properties": {"file": {"type": "string", "format": "binary"}}}}}}})
-    async def replace(config_id: UUID, request: Request, expected_current_version: int | None = Query(default=None, gt=0)):
+    async def replace(config_id: UUID, request: Request, expected_current_version: int = Query(gt=0)):
         return await upload(request, config_id, expected_current_version)
 
     @app.patch("/api/configs/{config_id}", response_model=ConfigView)
     async def rename(config_id: UUID, values: Rename):
-        return await asyncio.to_thread(app.state.store.rename, str(config_id), values.name, values.description)
+        return await asyncio.to_thread(app.state.store.rename, str(config_id), values.name, values.description, values.expected_updated_at)
 
     @app.post("/api/configs/{config_id}/enable", response_model=ConfigView)
-    async def enable(config_id: UUID):
-        return await asyncio.to_thread(app.state.store.change, str(config_id), "enable")
+    async def enable(config_id: UUID, expected_updated_at: str):
+        return await asyncio.to_thread(app.state.store.change, str(config_id), "enable", expected_updated_at)
 
     @app.post("/api/configs/{config_id}/disable", response_model=ConfigView)
-    async def disable(config_id: UUID):
-        return await asyncio.to_thread(app.state.store.change, str(config_id), "disable")
+    async def disable(config_id: UUID, expected_updated_at: str):
+        return await asyncio.to_thread(app.state.store.change, str(config_id), "disable", expected_updated_at)
 
     @app.post("/api/configs/{config_id}/rotate-token", response_model=ConfigView)
-    async def rotate(config_id: UUID):
-        return await asyncio.to_thread(app.state.store.change, str(config_id), "rotate-token")
+    async def rotate(config_id: UUID, expected_updated_at: str):
+        return await asyncio.to_thread(app.state.store.change, str(config_id), "rotate-token", expected_updated_at)
 
     @app.delete("/api/configs/{config_id}", status_code=204)
-    async def delete(config_id: UUID):
-        await asyncio.to_thread(app.state.store.change, str(config_id), "delete")
+    async def delete(config_id: UUID, expected_updated_at: str):
+        await asyncio.to_thread(app.state.store.change, str(config_id), "delete", expected_updated_at)
         return Response(status_code=204)
 
     @app.get("/api/configs/{config_id}/versions")
@@ -224,13 +242,19 @@ def create_app(settings=None, verifier=None):
     async def backup_get(backup_id: UUID):
         return await asyncio.to_thread(app.state.backups.get, str(backup_id))
 
+    def verified_archive(backup_id: UUID):
+        with app.state.backups.download(str(backup_id)) as archive:
+            yield archive
+
     @app.get("/api/backups/{backup_id}/download")
-    async def backup_download(backup_id: UUID):
-        path = await asyncio.to_thread(app.state.backups.download, str(backup_id))
-        return FileResponse(path, filename=path.name, media_type="application/octet-stream")
+    async def backup_download(backup_id: UUID, archive=Depends(verified_archive)):
+        headers = {"Content-Disposition": f'attachment; filename="{backup_id}.mcmbackup"',
+                   "Content-Length": str(os.fstat(archive.fileno()).st_size)}
+        return StreamingResponse(iter(lambda: archive.read(65536), b""), headers=headers,
+                                 media_type="application/octet-stream")
 
     @app.delete("/api/backups/{backup_id}", status_code=204)
-    async def backup_delete(backup_id: UUID):
+    async def backup_delete(backup_id: str):
         await asyncio.to_thread(app.state.backups.delete, str(backup_id))
         return Response(status_code=204)
 
@@ -241,13 +265,12 @@ def create_app(settings=None, verifier=None):
             schemes.update({
                 "AccessJWT": {"type": "apiKey", "in": "header", "name": "Cf-Access-Jwt-Assertion"},
                 "CSRFHeader": {"type": "apiKey", "in": "header", "name": "X-CSRF-Token"},
-                "CSRFCookie": {"type": "apiKey", "in": "cookie", "name": csrf.cookie_name},
             })
             schema["security"] = [{"AccessJWT": []}]
             for path in schema["paths"].values():
                 for method, operation in path.items():
                     if method in {"post", "put", "patch", "delete"}:
-                        operation["security"] = [{"AccessJWT": [], "CSRFHeader": [], "CSRFCookie": []}]
+                        operation["security"] = [{"AccessJWT": [], "CSRFHeader": []}]
                         operation.setdefault("parameters", []).append({"name": "Origin", "in": "header", "required": True, "schema": {"type": "string", "enum": [settings.origin]}})
             app.openapi_schema = schema
         return app.openapi_schema

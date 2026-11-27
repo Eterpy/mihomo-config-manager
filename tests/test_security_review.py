@@ -62,15 +62,16 @@ def test_successful_revocations_survive_restart(settings, tmp_path):
     disabled = store.create(source, "disabled.yaml", "disabled")
     deleted = store.create(source, "deleted.yaml", "deleted")
     rotated = store.create(source, "rotated.yaml", "rotated")
+    old_links = [store.subscription_url(row["id"]) for row in (disabled, deleted, rotated)]
     store.change(disabled["id"], "disable")
     store.change(deleted["id"], "delete")
     new = store.change(rotated["id"], "rotate-token")
     store.close()
     recovered = Store(settings)
     try:
-        for old in (disabled, deleted, rotated):
-            assert not (recovered.published / (old["subscription_url"].split("/")[-2] + ".yaml")).exists()
-        assert (recovered.published / (new["subscription_url"].split("/")[-2] + ".yaml")).read_bytes() == source.read_bytes()
+        for old in old_links:
+            assert not (recovered.published / (old.split("/")[-2] + ".yaml")).exists()
+        assert (recovered.published / (recovered.subscription_url(new["id"]).split("/")[-2] + ".yaml")).read_bytes() == source.read_bytes()
         assert (recovered.private.stat().st_mode & 0o777) == 0o700
         assert (recovered.root.stat().st_mode & 0o777) == 0o700
     finally:
@@ -86,13 +87,14 @@ def test_preflight_requires_safe_loopback_engine(tmp_path, version, allowed):
     scripts.mkdir()
     script = scripts / "preflight.sh"
     script.write_bytes(original.read_bytes())
+    (scripts / "check-compose-project.sh").write_bytes(original.with_name("check-compose-project.sh").read_bytes())
     (tmp_path / ".env").touch()
     for directory in ("db", "private", "published"):
         (tmp_path / "data" / directory).mkdir(parents=True)
     commands = tmp_path / "bin"
     commands.mkdir()
     docker = commands / "docker"
-    docker.write_text('#!/bin/sh\nif [ "$1" = "version" ]; then echo "$TEST_ENGINE_VERSION"; fi\n')
+    docker.write_text('#!/bin/sh\ncase "$1" in version) echo "$TEST_ENGINE_VERSION";; compose) echo "name: test";; esac\n')
     docker.chmod(0o755)
     ss = commands / "ss"
     ss.write_text("#!/bin/sh\nexit 0\n")

@@ -1,3 +1,4 @@
+from tests.helpers import link, revision
 import json
 import sqlite3
 import time
@@ -25,11 +26,12 @@ def test_history_rollback(upload, client):
     raw = b'\xef\xbb\xbfproxies: []\r\n'
     item = upload(raw).json()
     base = '/api/configs/' + item['id']
-    client.put(base + '/content', files={'file': ('new.yaml', b'value: 2\n')})
-    client.post(base + '/disable')
+    old_link = link(client, item)
+    client.put(base + '/content', params={'expected_current_version': 1}, files={'file': ('new.yaml', b'value: 2\n')})
+    client.post(base + '/disable', params=revision(client, base))
     response = client.post(base + '/versions/1/rollback', json={'expected_current_version': 2})
     assert response.status_code == 200
-    assert response.json()['subscription_url'] == item['subscription_url']
+    assert link(client, response.json()) == old_link
     assert response.json()['version'] == 3 and not response.json()['enabled']
     assert client.get(base + '/preview').content == raw
     assert client.get(base + '/versions').json()[0]['source_version'] == 1
@@ -44,7 +46,7 @@ def test_backup_restore(upload, client, application, settings, tmp_path):
     ident = response.json()['id']
     row = finish(client, ident)
     assert row['status'] == 'ready', row
-    path = application.state.backups.download(ident)
+    path = (application.state.backups.root / (ident + '.mcmbackup'))
     download = client.get(f'/api/backups/{ident}/download')
     assert download.content == path.read_bytes()
     assert 'no-store' in download.headers['cache-control']
@@ -54,7 +56,7 @@ def test_backup_restore(upload, client, application, settings, tmp_path):
     restored = Store(replace(settings, data_dir=tmp_path / 'restored'))
     try:
         new = restored.list()[0]
-        assert new['subscription_url'] != item['subscription_url']
+        assert restored.subscription_url(new['id']) != link(client, item)
         assert restored.preview(new['id']) == b'proxies: []\n'
         assert len(list(restored.published.iterdir())) == 1
     finally:
@@ -92,7 +94,7 @@ def test_backup_disk_failure(upload, client, application, monkeypatch):
     import app.backups as module
     monkeypatch.setattr(module.shutil, 'disk_usage', lambda _: namedtuple('Usage','total used free')(1,1,0))
     ident = client.post('/api/backups', json={'password': PASSWORD}).json()['id']
-    assert finish(client, ident)['status'] == 'failed'
+    assert finish(client, ident)['error_code'] == 'disk_space'
     assert client.get(f'/api/backups/{ident}/download').status_code == 409
     assert not application.state.store.snapshotting
 

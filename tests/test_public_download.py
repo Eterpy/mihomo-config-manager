@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 
+from tests.helpers import link, revision
 from tests.test_server import container_keys, container_settings
 
 pytestmark = [pytest.mark.container, pytest.mark.skipif(os.getenv("MCM_CONTAINER_TEST") != "1", reason="run scripts/test-containers.sh on Docker host")]
@@ -45,7 +46,7 @@ def test_live_download_lifecycle(remote):
     content = b"\xef\xbb\xbf# original\r\nproxies: []\r\n"
     item = create(remote, content)
     second = create(remote)
-    path = urlsplit(item["subscription_url"]).path
+    path = urlsplit(link(remote, item)).path
     status, headers, body = request_public(path)
     assert status == 200 and body == content
     assert headers["content-type"] == "text/yaml; charset=utf-8"
@@ -57,56 +58,56 @@ def test_live_download_lifecycle(remote):
     assert status == 200 and not body and int(head_headers["content-length"]) == len(content)
     base = f'/api/configs/{item["id"]}'
     updated = b"# changed\nproxies: []\n"
-    response = remote.put(base + "/content", files={"file": ("new.yaml", updated)})
+    response = remote.put(base + "/content", params={"expected_current_version": 1}, files={"file": ("new.yaml", updated)})
     assert response.status_code == 200
-    assert response.json()["subscription_url"] == item["subscription_url"]
+    assert urlsplit(link(remote, response.json())).path == path
     status, _, body = request_public(path, headers={"If-Modified-Since": "Wed, 31 Dec 2098 23:59:59 GMT", "If-None-Match": '"old"'})
     assert status == 200 and body == updated
-    assert remote.post(base + "/disable").status_code == 200
+    assert remote.post(base + "/disable", params=revision(remote, base)).status_code == 200
     assert request_public(path)[0] == 404
-    assert remote.post(base + "/enable").status_code == 200
+    assert remote.post(base + "/enable", params=revision(remote, base)).status_code == 200
     assert request_public(path)[0] == 200
-    rotated = remote.post(base + "/rotate-token").json()
-    new_path = urlsplit(rotated["subscription_url"]).path
+    rotated = remote.post(base + "/rotate-token", params=revision(remote, base)).json()
+    new_path = urlsplit(link(remote, rotated)).path
     assert request_public(path)[0] == 404
     assert request_public(path, "HEAD")[0] == 404
     assert request_public(new_path)[2] == updated
-    assert request_public(urlsplit(second["subscription_url"]).path)[0] == 200
-    assert remote.delete(base).status_code == 204
+    assert request_public(urlsplit(link(remote, second)).path)[0] == 200
+    assert remote.delete(base, params=revision(remote, base)).status_code == 204
     assert request_public(new_path)[0] == 404
-    assert remote.delete(f'/api/configs/{second["id"]}').status_code == 204
+    assert remote.delete(f'/api/configs/{second["id"]}', params=revision(remote, f'/api/configs/{second["id"]}')).status_code == 204
 
 
 def test_live_paths_methods_and_auth(remote):
     item = create(remote)
-    path = urlsplit(item["subscription_url"]).path
+    path = urlsplit(link(remote, item)).path
     for invalid in ["/", "/api", "/data", "/.env", "/../", "/healthz", "/data/db/manager.sqlite3", "/private/" + item["id"] + "/versions/1.yaml", "/published/" + path.split("/")[-2] + ".yaml", path.upper(), "/s/" + "a" * 63 + "/profile.yaml", "/s/" + "0" * 64 + "/profile.yaml", path + "/", path + "?k=x", path.replace("/s/", "//s/"), path.replace("/s/", "/%73/"), "/extra/.." + path, path.replace("/profile", "/%70rofile")]:
         assert request_public(invalid)[0] == 404
     for method in ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]:
         assert request_public(path, method)[0] == 404
     assert remote.get("/api/configs", headers={"Cf-Access-Jwt-Assertion": ""}).status_code == 401
     assert remote.get("/healthz").status_code == (200 if os.getenv("MCM_TEST_ADMIN_URL") else 404)
-    assert remote.delete(f'/api/configs/{item["id"]}').status_code == 204
+    assert remote.delete(f'/api/configs/{item["id"]}', params=revision(remote, f'/api/configs/{item["id"]}')).status_code == 204
 
 
 def test_live_replace_concurrent_downloads(remote):
     old, new = b"value: " + b"a" * 100000, b"value: " + b"b" * 200000
     item = create(remote, old)
-    path = urlsplit(item["subscription_url"]).path
+    path = urlsplit(link(remote, item)).path
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         jobs = [pool.submit(lambda: [request_public(path) for _ in range(20)]) for _ in range(3)]
         for index in range(4):
-            response = remote.put(f'/api/configs/{item["id"]}/content', files={"file": ("new.yaml", new if index % 2 == 0 else old)})
+            response = remote.put(f'/api/configs/{item["id"]}/content', params={'expected_current_version': index + 1}, files={"file": ("new.yaml", new if index % 2 == 0 else old)})
             assert response.status_code == 200
         for job in jobs:
             assert all(status == 200 and body in {old, new} for status, _, body in job.result())
-    remote.delete(f'/api/configs/{item["id"]}')
+    remote.delete(f'/api/configs/{item["id"]}', params=revision(remote, f'/api/configs/{item["id"]}'))
 
 
 def test_public_path_encoding_never_exposes_profile(remote):
     content = b"password: synthetic-private-canary\n"
     item = create(remote, content)
-    path = urlsplit(item["subscription_url"]).path
+    path = urlsplit(link(remote, item)).path
     token = path.split("/")[2]
     invalid_paths = [
         path + ".bak", path + "%00", path + "%0a", path + ";ignored",
@@ -125,25 +126,25 @@ def test_public_path_encoding_never_exposes_profile(remote):
                 assert b"synthetic-private-canary" not in body
                 assert "no-store" in headers["cache-control"]
     finally:
-        remote.delete(f'/api/configs/{item["id"]}')
+        remote.delete(f'/api/configs/{item["id"]}', params=revision(remote, f'/api/configs/{item["id"]}'))
 
 
 def test_public_never_trusts_identity_headers(remote):
     item = create(remote)
     try:
-        headers = {"Cf-Access-Jwt-Assertion": remote.headers["Cf-Access-Jwt-Assertion"], "Cf-Access-Authenticated-User-Email": "owner@example.invalid", "X-Original-URL": urlsplit(item["subscription_url"]).path, "X-Rewrite-URL": urlsplit(item["subscription_url"]).path}
+        headers = {"Cf-Access-Jwt-Assertion": remote.headers["Cf-Access-Jwt-Assertion"], "Cf-Access-Authenticated-User-Email": "owner@example.invalid", "X-Original-URL": urlsplit(link(remote, item)).path, "X-Rewrite-URL": urlsplit(link(remote, item)).path}
         for invalid in ("/api/configs", "/data/db/manager.sqlite3", "/private/", "/s/invalid/profile.yaml"):
             assert request_public(invalid, headers=headers)[0] == 404
     finally:
-        remote.delete(f'/api/configs/{item["id"]}')
+        remote.delete(f'/api/configs/{item["id"]}', params=revision(remote, f'/api/configs/{item["id"]}'))
 
 
 def test_live_history_and_backup_isolation(remote):
     import time
     item = create(remote, b'original: true\n')
     base = '/api/configs/' + item['id']
-    path = urlsplit(item['subscription_url']).path
-    assert remote.put(base + '/content', files={'file': ('new.yaml', b'new: true\n')}).status_code == 200
+    path = urlsplit(link(remote, item)).path
+    assert remote.put(base + '/content', params={'expected_current_version': 1}, files={'file': ('new.yaml', b'new: true\n')}).status_code == 200
     assert remote.post(base + '/versions/1/rollback', json={'expected_current_version': 2}).status_code == 200
     assert request_public(path)[2] == b'original: true\n'
     response = remote.post('/api/backups', json={'password': 'isolated-test-passphrase'})
@@ -159,4 +160,4 @@ def test_live_history_and_backup_isolation(remote):
         assert request_public(candidate)[0] == 404
     assert remote.get(f'/api/backups/{ident}/download').content.startswith(b'MCMBAK01')
     assert remote.delete('/api/backups/' + ident).status_code == 204
-    assert remote.delete(base).status_code == 204
+    assert remote.delete(base, params=revision(remote, base)).status_code == 204
