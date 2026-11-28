@@ -72,6 +72,25 @@ def test_backup_restore(upload, client, application, settings, tmp_path):
     assert not path.exists()
 
 
+def test_restore_republishes_enabled_bytes_after_unpacking(upload, client, application, settings, tmp_path):
+    content = b'payload: ' + b'a' * (256 * 1024) + b'\n'
+    enabled = upload(content).json()
+    disabled = upload(content, filename='disabled.yml').json()
+    base = '/api/configs/' + disabled['id']
+    assert client.post(base + '/disable', params=revision(client, base)).status_code == 200
+    ident = client.post('/api/backups', json={'password': PASSWORD}).json()['id']
+    archive_size = finish(client, ident)['size']
+    destination = tmp_path / 'restored'
+    prepare(application.state.backups.root / (ident + '.mcmbackup'), destination, PASSWORD, 1024**3)
+    assert not list((destination / 'published').iterdir())
+    store = Store(replace(settings, data_dir=destination))
+    try:
+        published, = store.published.iterdir()
+        assert published.stat().st_size == enabled['size'] > 2 * archive_size
+    finally:
+        store.close()
+
+
 def test_backup_auth_and_password(client):
     assert client.post('/api/backups', json={'password': 'short'}).status_code == 422
     assert client.post('/api/backups', json={'password': PASSWORD}, headers={'Origin': 'https://evil.test'}).status_code == 403

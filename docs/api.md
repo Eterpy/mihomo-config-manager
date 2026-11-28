@@ -49,7 +49,7 @@
 | GET / HEAD | `/api/backups/{id}/download` | 可选 `Range`、`If-Range` | 完整文件 200，单段范围 206，无法满足范围 416；HEAD 仅返回响应头。归档未完成、缺失或 SHA-256 不符时返回 409 |
 | DELETE | `/api/backups/{id}` | — | 204；任务进行中时返回 409 |
 
-配置和备份任务的 `{id}` 为 UUID。未登记归档使用列表给出的 `file-…` ID，仅供手动删除。`{version}` 为正整数。不要把真实备份密码写进 shell 历史或脚本。备份 ID 不是下载凭据，下载同样需要登录。
+配置和备份任务的 `{id}` 为 UUID。未登记归档使用列表给出的 `file-…` ID，仅供手动删除。`{version}` 的范围为 1 到 2⁶³−1。不要把真实备份密码写进 shell 历史或脚本。备份 ID 不是下载凭据，下载同样需要登录。
 
 备份下载支持 `bytes=start-end`、`bytes=start-` 和 `bytes=-suffix`。首次下载先校验完整归档。同一管理进程内，GET、HEAD 和并发分段请求共享成功的校验结果；文件被替换、大小或时间戳改变，或管理端重启后会重新计算 SHA-256。成功响应带 `Accept-Ranges: bytes` 和由 SHA-256 构成的强 ETag。206 返回所选区间的 `Content-Range` 与长度；416 返回 `Content-Range: bytes */总长度`。多段请求或 `If-Range` 不匹配时返回完整文件。
 
@@ -65,7 +65,7 @@
 
 ## 错误
 
-API 错误返回 `detail`。文件名按解码后的字符数计，最长 255 字符；相关错误码为 `filename_invalid`、`filename_too_long` 或 `name_invalid`。对已有配置执行修改时，使用上次读取的版本号或原样传回 `updated_at`（查询参数需 URL 编码）；过期返回 409、`code=stale` 和 `current` 配置对象。重新读取、核对后再提交。
+API 错误返回 `detail`。文件名按解码后的字符数计，最长 255 字符；相关错误码为 `filename_invalid`、`filename_too_long` 或 `name_invalid`。上传和改名的说明最多 2000 个字符，允许换行、回车和制表符，其他控制字符或超长说明返回 422 和 `description_invalid`。对已有配置执行修改时，使用上次读取的版本号或原样传回 `updated_at`（查询参数需 URL 编码）；过期返回 409、`code=stale` 和 `current` 配置对象。重新读取、核对后再提交。
 
 | 状态码 | 含义 |
 |---|---|
@@ -76,7 +76,7 @@ API 错误返回 `detail`。文件名按解码后的字符数计，最长 255 �
 | 409 | 名称冲突、版本已变化（`code=stale`）、内容与当前版本相同（`code=unchanged`）、任务状态不允许 |
 | 413 | 超过大小限制 |
 | 422 | 参数或 YAML 校验失败 |
-| 428 | 缺少版本或修改时间前置条件 |
+| 428 | 仅缺少版本或修改时间前置条件。配置 ID 等字段同时不合法时返回 422 |
 | 429 | 已有上传或备份任务在执行 |
 | 503 | 认证公钥暂不可用、存储需要恢复或正在创建快照 |
 

@@ -85,3 +85,38 @@ def test_filename_errors(upload):
     assert upload(filename='x' * 251 + '.yaml').json()['code'] == 'filename_too_long'
     assert upload(filename='../x.yaml').json()['code'] == 'filename_invalid'
     assert upload(name='x' * 101).json()['code'] == 'name_invalid'
+
+
+@pytest.mark.parametrize('version', [0, -1, 2**63, 2**63 - 1])
+def test_history_version_range(client, upload, version):
+    item = upload().json()
+    path = f"/api/configs/{item['id']}/versions/{version}"
+    expected = 404 if version == 2**63 - 1 else 422
+    assert client.get(path + '/preview').status_code == expected
+    assert client.post(path + '/rollback', json={'expected_current_version': 1}).status_code == expected
+
+
+@pytest.mark.parametrize('method,suffix', [('DELETE', ''), ('POST', '/enable'), ('PATCH', '')])
+def test_invalid_config_id_with_and_without_precondition(client, method, suffix):
+    path = '/api/configs/not-a-uuid' + suffix
+    fields = {'expected_updated_at': 'example'}
+    assert client.request(method, path).status_code == 422
+    arguments = {'json': fields} if method == 'PATCH' else {'params': fields}
+    assert client.request(method, path, **arguments).status_code == 422
+
+
+@pytest.mark.parametrize('value', ['a\0b', 'a\x07b', '\x7f', '\x85', '字' * 2001, '第一行\r\n\t第二行', '字' * 2000],
+                         ids=['nul', 'bell', 'del', 'c1', 'too-long', 'multiline', 'max-length'])
+def test_upload_and_rename_description(client, upload, value):
+    base = upload().json()
+    path = '/api/configs/' + base['id']
+    created = client.post('/api/configs', files={'file': ('second.yaml', b'x: 2')}, data={'description': value})
+    renamed = client.patch(path, json={'description': value, 'expected_updated_at': base['updated_at']})
+    if value.startswith('第一行') or len(value) == 2000:
+        assert (created.status_code, renamed.status_code) == (201, 200)
+        for item in [created.json(), renamed.json()]:
+            assert client.get('/api/configs/' + item['id']).json()['description'] == value
+    else:
+        assert created.status_code == renamed.status_code == 422
+        assert created.json()['code'] == renamed.json()['code'] == 'description_invalid'
+        assert client.get('/api/configs').json() == [base]

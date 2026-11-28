@@ -22,6 +22,12 @@ def filename_valid(name: str):
     return name
 
 
+def description_valid(value: str):
+    if not isinstance(value, str) or len(value) > 2000 or re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", value):
+        raise AppError(422, "说明最长 2000 个字符，控制字符仅允许换行、回车和制表符", code="description_invalid")
+    return value
+
+
 def display_name(name: str):
     name = name.strip()
     if not 1 <= len(name) <= 100 or re.search(r"[\x00-\x1f\x7f]", name):

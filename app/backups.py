@@ -270,24 +270,28 @@ class Backups:
 
     def list(self):
         with self.archive_lock, self.store.db.connect() as con:
-            files = {path.name: path for path in self.archives()}
-            used = sum(p.stat().st_size for p in files.values())
+            files = {}
+            for path in self.archives():
+                try:
+                    files[path.name] = path.stat()
+                except FileNotFoundError:
+                    continue
+            used = sum(info.st_size for info in files.values())
             items = [dict(r) for r in con.execute('SELECT * FROM backup_jobs ORDER BY created_at DESC')]
             for item in items:
-                path = files.pop(item['id'] + '.mcmbackup', None)
+                info = files.pop(item['id'] + '.mcmbackup', None)
                 if item['status'] != 'ready':
                     continue
                 code = None
-                if path is None:
+                if info is None:
                     code = 'archive_missing'
-                elif path.stat().st_size != item['size']:
+                elif info.st_size != item['size']:
                     code = 'archive_corrupt'
                 if code:
                     con.execute("UPDATE backup_jobs SET status='failed', error_code=? WHERE id=?", (code, item['id']))
                     item.update(status='failed', error_code=code)
-            for path in files.values():
-                info = path.stat()
-                items.append({'id': self.unregistered_id(path), 'filename': path.name, 'status': 'unregistered',
+            for name, info in files.items():
+                items.append({'id': self.unregistered_id(self.root / name), 'filename': name, 'status': 'unregistered',
                               'created_at': datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat(),
                               'size': info.st_size, 'sha256': None, 'error_code': None})
             return {'items': items, 'used_bytes': used, 'quota_bytes': self.store.settings.backup_quota_bytes,
@@ -373,7 +377,6 @@ class Backups:
                 sync_dir(self.root)
                 self.update(ident, 'ready', size=size, sha256=sha)
         except Exception as exc:
-            output.unlink(missing_ok=True)
             code = 'storage_error'
             if isinstance(exc, BackupFailure):
                 code = exc.code
@@ -381,7 +384,9 @@ class Backups:
                 code = 'too_large'
             elif isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
                 code = 'disk_space'
-            self.update(ident, 'failed', error_code=code)
+            with self.archive_lock:
+                output.unlink(missing_ok=True)
+                self.update(ident, 'failed', error_code=code)
         finally:
             password = None
             shutil.rmtree(work, ignore_errors=True)

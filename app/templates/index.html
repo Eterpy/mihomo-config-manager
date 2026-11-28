@@ -37,13 +37,13 @@
       <input id="replace-input" type="file" accept=".yaml,.yml" hidden>
     </section>
     <section class="library">
-      <div class="section-heading"><h2>配置库 <span id="count-badge">0</span></h2><div class="list-tools"><label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索名称或文件名" aria-label="搜索名称或文件名"></label><button id="refresh" class="icon-button">刷新</button></div></div>
-      <div id="list" class="config-grid" aria-live="polite"></div>
+      <div class="section-heading"><h2>配置库 <span id="count-badge">—</span></h2><div class="list-tools"><label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索名称或文件名" aria-label="搜索名称或文件名"></label><button id="refresh" class="icon-button">刷新</button></div></div>
+      <div id="list" class="config-grid"></div>
       <div id="empty" class="empty" hidden><span class="empty-icon" aria-hidden="true">{ }</span><h3>从第一份配置开始</h3><p>上传后会自动生成独立订阅链接。更新文件时，链接保持不变。</p></div>
       <div id="no-results" class="empty" hidden><h3>没有找到匹配的配置</h3><p>试试其他名称或文件名。</p></div>
     </section>
-      <section class="backup-section"><h2>加密备份</h2><p>备份包含全部配置和历史。密码遗失无法恢复；恢复会重置全部订阅链接。</p><button id="backup-new">创建加密备份</button><button id="backup-refresh">刷新备份</button><p id="backup-quota"></p><div id="backup-list"></div></section>
-  <footer><p>订阅链接是读取凭据，请妥善保管。泄露时可重置 Token 撤销旧链接。</p><span class="version">V0.4.0</span></footer>
+      <section class="backup-section"><h2>加密备份</h2><p>备份包含全部配置和历史。密码遗失无法恢复；恢复会重置全部订阅链接。</p><button id="backup-new">创建加密备份</button><button id="backup-refresh">刷新备份</button><div id="backup-error"><p id="backup-create-error" role="alert"></p><p id="backup-list-error" role="alert"></p></div><p id="backup-quota"></p><div id="backup-list"></div></section>
+  <footer><p>订阅链接是读取凭据，请妥善保管。泄露时可重置 Token 撤销旧链接。</p><span class="version">V0.4.1</span></footer>
   </main>
   <template id="card-template">
     <article class="config-card">
@@ -96,7 +96,7 @@
   </dialog>
 
   <dialog id="backup-dialog"><form id="backup-form"><h2>创建加密备份</h2><label class="form-label">密码（16–256 个字符）<input id="backup-password" type="password" minlength="16" maxlength="256" required autocomplete="new-password"></label><label class="form-label">确认密码<input id="backup-confirm" type="password" required autocomplete="new-password"></label><button type="button" data-close="backup-dialog">取消</button><button type="submit">创建</button></form></dialog>
-  <dialog id="history-dialog" aria-labelledby="history-title"><div class="dialog-heading"><h2 id="history-title">历史版本</h2><button data-close="history-dialog">关闭</button></div><p id="history-error" role="alert"></p><div id="history-list"></div></dialog>
+  <dialog id="history-dialog" aria-labelledby="history-title"><div class="dialog-heading"><h2 id="history-title">历史版本</h2><button data-close="history-dialog">关闭</button></div><p id="history-error" role="alert"></p><p id="history-status" role="status"></p><div id="history-list"></div></dialog>
   <dialog id="preview-dialog"><div class="dialog-heading"><div><p class="eyebrow">原始 YAML · 只读预览</p><h2 id="preview-title"></h2></div><button class="icon-button" data-close="preview-dialog" aria-label="关闭预览">✕</button></div><pre id="preview-content"></pre></dialog>
   <dialog id="rename-dialog"><form id="rename-form"><div class="dialog-heading"><h2>修改配置信息</h2><button type="button" class="icon-button" data-close="rename-dialog" aria-label="取消">✕</button></div><label class="form-label">显示名称<input id="rename-name" required maxlength="100" autocomplete="off"></label><label class="form-label">说明（可选）<textarea id="rename-description" maxlength="2000" rows="3"></textarea></label><p id="rename-error" role="alert"></p><div class="dialog-footer"><button type="button" data-close="rename-dialog">取消</button><button type="submit" class="primary">保存修改</button></div></form></dialog>
   <dialog id="link-dialog"><div class="dialog-heading"><h2>订阅链接</h2><button class="icon-button" data-close="link-dialog" aria-label="关闭">✕</button></div><p>浏览器未允许自动复制，请手动复制下方链接。</p><label class="form-label">请勿公开分享<input id="link-value" readonly></label></dialog>

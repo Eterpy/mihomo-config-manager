@@ -2,7 +2,7 @@
 services:
   init:
     build: {context: ., target: test}
-    image: yaml-config-manager-test:0.4.0
+    image: yaml-config-manager-test:0.4.1
     user: "0:0"
     command: [python, -m, tests.container_setup]
     network_mode: none
@@ -15,7 +15,7 @@ services:
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
     security_opt: [no-new-privileges:true]
   admin:
-    image: yaml-config-manager-test:0.4.0
+    image: yaml-config-manager-test:0.4.1
     user: "10001:10001"
     command: [uvicorn, "tests.test_server:create_test_app", --factory, --host, "0.0.0.0", --port, "8000", --workers, "1", --no-access-log, --no-proxy-headers, --no-server-header]
     depends_on:
@@ -57,7 +57,7 @@ services:
       timeout: 5s
       retries: 15
   runner:
-    image: yaml-config-manager-test:0.4.0
+    image: yaml-config-manager-test:0.4.1
     user: "10001:10001"
     command: [python, -m, pytest, -q, -p, "no:cacheprovider", -m, container]
     depends_on:

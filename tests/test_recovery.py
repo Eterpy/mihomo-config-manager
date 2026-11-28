@@ -129,15 +129,24 @@ def test_atomic_replace_never_partial(settings, source):
     assert observed and observed <= {old, new}
 
 
-def test_single_writer_and_corrupt_private_file_fail_closed(settings, source):
+@pytest.mark.parametrize("disabled", [False, True])
+def test_single_writer_and_corrupt_private_file_fail_closed(settings, source, application, disabled):
+    from fastapi.testclient import TestClient
+    from app.errors import CurrentVersionError
     store = Store(settings)
     item = store.create(source, "x.yaml", "x")
     with pytest.raises(BlockingIOError):
         Store(settings)
+    if disabled:
+        store.change(item["id"], "disable")
+    token = store.subscription_url(item["id"]).split("/")[-2]
     (store.private / item["id"] / "versions" / "1.yaml").write_bytes(b"corrupt")
     store.close()
-    with pytest.raises(OSError):
-        Store(settings)
+    with pytest.raises(CurrentVersionError) as exc:
+        with TestClient(application):
+            pytest.fail("corrupt current version allowed startup")
+    assert str(exc.value) == f"配置 {item['id']} 的当前版本 1 文件缺失或校验失败"
+    assert token not in str(exc.value)
 
 
 @pytest.mark.parametrize('change', ['versions', 'rotate'])

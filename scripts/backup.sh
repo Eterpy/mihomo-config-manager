@@ -18,7 +18,7 @@ exec 8>.restore-controller.lock
 flock -n 8 || { echo "已有恢复或校验命令运行。" >&2; exit 1; }
 [ -t 0 ] || { echo '需要交互终端。' >&2; exit 1; }
 [ ! -L .restore-work ] && [ ! -L .restore-state ] && [ ! -L data ] || exit 1
-image=yaml-config-manager-admin:0.4.0
+image=yaml-config-manager-admin:0.4.1
 work="$project_dir/.restore-work"
 journal_prefix=v2:
 old_dir=

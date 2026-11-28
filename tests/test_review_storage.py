@@ -224,3 +224,118 @@ def test_concurrent_ranges_share_digest_and_recheck_modified_archive(client, app
     assert client.get(url, headers={'Range': 'bytes=1-10'}).status_code == 409
     assert len(calls) == 3
     assert client.get(f'/api/backups/{ident}').json()['error_code'] == 'archive_corrupt'
+
+
+@pytest.mark.parametrize('level', ['config', 'versions'])
+def test_version_write_requires_real_directories(client, application, upload, tmp_path, level):
+    item = upload().json()
+    store = application.state.store
+    directory = store.private / item['id']
+    if level == 'versions':
+        directory /= 'versions'
+    directory.rename(tmp_path / 'saved')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    directory.symlink_to(outside, target_is_directory=True)
+    base = '/api/configs/' + item['id']
+    for content in [b'x: 2', b'proxies: []\n']:
+        response = client.put(base + '/content', params={'expected_current_version': 1},
+                              files={'file': ('new.yaml', content)})
+        assert response.status_code == 503 and response.json()['detail'] == '私有版本目录异常'
+        assert list(outside.iterdir()) == []
+        assert client.get(base).json() == item
+        assert len(client.get(base + '/versions').json()) == 1
+        assert client.get('/api/status').json()['ready']
+
+
+@pytest.mark.parametrize('level', ['config', 'versions'])
+def test_disable_keeps_pending_intent_if_pruning_directory_is_invalid(client, application, upload, tmp_path, level):
+    store = application.state.store
+    item = upload().json()
+    ident = item['id']
+    base = '/api/configs/' + ident
+    directory = store.private / ident
+    if level == 'versions':
+        directory /= 'versions'
+    original = tmp_path / 'saved'
+    directory.rename(original)
+    outside = tmp_path / 'outside'
+    target = outside if level == 'versions' else outside / 'versions'
+    target.mkdir(parents=True)
+    marker = target / 'keep.txt'
+    marker.write_bytes(b'preserve')
+    directory.symlink_to(outside)
+    response = client.post(base + '/disable', params={'expected_updated_at': item['updated_at']})
+    assert response.status_code == 503
+    assert marker.read_bytes() == b'preserve'
+    assert not client.get('/api/status').json()['ready']
+    assert client.get(base).json()['status'] == 'pending'
+    directory.unlink()
+    original.rename(directory)
+    store.recover()
+    row = client.get(base).json()
+    assert row['status'] == 'ready' and not row['enabled']
+    assert (store.private / ident / 'versions/1.yaml').is_file()
+
+
+def test_create_checks_private_directory_before_writing(client, application, upload, tmp_path, monkeypatch):
+    from uuid import uuid4
+    ident = uuid4()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (application.state.store.private / str(ident)).symlink_to(outside)
+    monkeypatch.setattr('app.services.uuid.uuid4', lambda: ident)
+    assert upload().status_code == 503
+    assert list(outside.iterdir()) == []
+    assert client.get('/api/configs').json() == []
+    assert client.get('/api/status').json()['ready']
+
+
+def test_backup_list_skips_disappeared_file(client, application, monkeypatch):
+    backups = application.state.backups
+    missing = backups.root / 'missing.mcmbackup'
+    present = backups.root / 'present.mcmbackup'
+    present.write_bytes(b'keep')
+    monkeypatch.setattr(backups, 'archives', lambda: [missing, present])
+    response = client.get('/api/backups')
+    assert response.status_code == 200
+    assert response.json()['used_bytes'] == 4
+    assert [item['filename'] for item in response.json()['items']] == [present.name]
+
+
+def test_list_during_backup_publication_failure(client, application, monkeypatch):
+    from pathlib import Path
+    backups = application.state.backups
+    update, unlink = backups.update, Path.unlink
+    cleaning, resume = threading.Event(), threading.Event()
+
+    def fail_ready(ident, state, **values):
+        if state == 'ready':
+            assert (backups.root / (ident + '.mcmbackup')).is_file()
+            raise sqlite3.OperationalError('injected')
+        update(ident, state, **values)
+
+    def pause_cleanup(path, *args, **kwargs):
+        if path.suffix == '.mcmbackup':
+            cleaning.set()
+            assert resume.wait(5)
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(backups, 'update', fail_ready)
+    monkeypatch.setattr(Path, 'unlink', pause_cleanup)
+    ident = client.post('/api/backups', json={'password': PASSWORD}).json()['id']
+    with ThreadPoolExecutor() as pool:
+        try:
+            assert cleaning.wait(5)
+            listing = pool.submit(client.get, '/api/backups')
+            acquired = backups.archive_lock.acquire(blocking=False)
+            if acquired:
+                backups.archive_lock.release()
+            assert not acquired
+        finally:
+            resume.set()
+        result = listing.result(timeout=5)
+    assert result.status_code == 200
+    assert result.json()['used_bytes'] == 0
+    item, = result.json()['items']
+    assert (item['id'], item['status'], item['error_code']) == (ident, 'failed', 'storage_error')

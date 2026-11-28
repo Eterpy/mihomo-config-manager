@@ -5,14 +5,18 @@ const changes = typeof BroadcastChannel === "function" ? new BroadcastChannel("m
 const networkErrorMessage = "网络连接失败，请恢复连接后重试";
 let configs = [], ready = false, busy = false, replacement = null, editing = null;
 function notify(message, error = false, source = "action") {
-  const el = $("#notice"); el.dataset.source = source; el.textContent = message; el.classList.toggle("error", error); el.hidden = false;
+  const el = $("#notice");
+  el.dataset.source = source;
+  if (el.textContent !== message) el.textContent = message;
+  el.classList.toggle("error", error);
+  el.hidden = false;
 }
 function requireLogin() {
   $("#login-notice").hidden = false;
   ready = false;
   $("#backup-new").disabled = true;
   $("#service-status").textContent = "需要重新登录";
-  render();
+  updateControls();
 }
 async function api(path, options = {}, retryCsrf = true) {
   if (!$("#login-notice").hidden && options.method && options.method !== "GET") throw new Error("请重新登录后重试");
@@ -48,15 +52,22 @@ async function api(path, options = {}, retryCsrf = true) {
   return response;
 }
 function bytes(size) { return size < 1024 ? `${size} B` : size < 1048576 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / 1048576).toFixed(2)} MiB`; }
+let recoveryRequired = false;
 function render() {
-  $("#total").textContent = configs.length;
-  $("#enabled").textContent = configs.filter(c => c.enabled && c.status === "ready").length;
-  $("#count-badge").textContent = configs.length;
+  $("#total").textContent = listLoaded ? configs.length : "—";
+  $("#enabled").textContent = listLoaded ? configs.filter(c => c.enabled && c.status === "ready").length : "—";
+  $("#count-badge").textContent = listLoaded ? configs.length : "—";
   const query = $("#search").value.trim().toLocaleLowerCase();
   const filtered = configs.filter(c => `${c.name} ${c.filename}`.toLocaleLowerCase().includes(query));
-  $("#list").replaceChildren();
+  const list = $("#list");
+  const focused = list.contains(document.activeElement) ? document.activeElement : null;
+  const focusedId = focused?.closest(".config-card")?.dataset.id;
+  const expanded = new Set(Array.from(list.querySelectorAll("details[open]"), el => el.closest(".config-card").dataset.id));
+  list.replaceChildren();
   for (const config of filtered) {
     const card = $("#card-template").content.cloneNode(true);
+    card.querySelector(".config-card").dataset.id = config.id;
+    card.querySelector("details").open = expanded.has(config.id);
     const field = (name, value) => { card.querySelector(`[data-field="${name}"]`).textContent = value; };
     field("name", config.name); field("filename", config.filename); field("size", bytes(config.size));
     field("version", `版本 ${config.version}`); field("sha256", config.sha256); field("short-sha", config.sha256.slice(0, 12));
@@ -64,62 +75,135 @@ function render() {
     card.querySelector("time").dateTime = config.updated_at;
     card.querySelector('[data-field="name"]').title = config.name;
     card.querySelector('[data-field="filename"]').title = config.filename;
-    field("badge", config.status !== "ready" ? "待恢复" : config.enabled ? "已启用" : "已停用");
+    if (config.status === "ready") field("badge", config.enabled ? "已启用" : "已停用");
     card.querySelector(".badge").classList.toggle("disabled", !config.enabled);
     card.querySelector(".badge").classList.toggle("pending", config.status !== "ready");
     field("description", config.description); card.querySelector(".description").hidden = !config.description;
     card.querySelector('[data-action="toggle"]').textContent = config.enabled ? "停用" : "启用";
     for (const button of card.querySelectorAll("[data-action]")) {
       button.addEventListener("click", () => action(button.dataset.action, config).catch(e => notify(e.message, true)));
-      button.disabled = busy || (button.hasAttribute("data-write") && (!ready || config.status !== "ready"));
     }
-    $("#list").append(card);
+    const focusTarget = config.id === focusedId
+      ? card.querySelector(focused.dataset.action ? `[data-action="${focused.dataset.action}"]` : "summary") : null;
+    list.append(card);
+    focusTarget?.focus({preventScroll: true});
   }
-  $("#empty").hidden = configs.length !== 0;
   $("#no-results").hidden = configs.length === 0 || filtered.length !== 0;
-  for (const id of ["#upload-top", "#upload-select"]) $(id).disabled = !ready || busy;
+  updateControls();
 }
-let loadGeneration = 0;
-let statusTimer, maxUploadBytes;
-async function load() {
-  const generation = ++loadGeneration;
-  try {
-    const [items, state] = await Promise.all([api("/api/configs").then(r => r.json()), api("/api/status").then(r => r.json())]);
-    if (generation !== loadGeneration) return;
-    clearTimeout(statusTimer);
-    if (state.snapshotting) statusTimer = setTimeout(load, 2000);
-    maxUploadBytes = state.max_upload_bytes;
-    const loginRestored = !$("#login-notice").hidden;
-    $("#login-notice").hidden = true;
-    configs = items; ready = state.ready && !state.snapshotting;
-    if (loginRestored) loadBackups();
-    $("#service-status").textContent = state.snapshotting ? "备份快照中" : ready ? "运行正常" : "需要恢复";
-    if (state.snapshotting) notify("正在创建一致快照，配置写入暂缓。", false, "status");
-    else if (!ready) notify("存储存在未完成操作。请检查服务器磁盘和权限，然后重启管理端恢复。", true, "status");
-    else if ($("#notice").dataset.source === "status") $("#notice").hidden = true;
-  } catch (error) {
-    if (generation !== loadGeneration) return;
-    ready = false; $("#service-status").textContent = $("#login-notice").hidden ? "连接异常" : "需要重新登录";
-    notify(error.message, true, "status");
+function updateControls() {
+  for (const card of $("#list").children) {
+    const pending = card.querySelector(".badge.pending");
+    if (pending) pending.textContent = recoveryRequired ? "待恢复" : "处理中";
+    for (const button of card.querySelectorAll("[data-action]")) {
+      button.disabled = busy || (button.hasAttribute("data-write") && (!ready || Boolean(pending)));
+    }
   }
-  render();
+  for (const id of ["#upload-top", "#upload-select"]) $(id).disabled = !ready || busy;
+  for (const button of document.querySelectorAll("#history-list [data-write]")) button.disabled = !ready || busy;
+}
+let configGeneration = 0, statusGeneration = 0;
+let listLoaded = false, listError = null, statusError = null, serviceState = null;
+let maxUploadBytes, backupActive = false, pollTimer, polling = false;
+
+function showAvailability() {
+  const loggedIn = $("#login-notice").hidden;
+  const wasReady = ready, neededRecovery = recoveryRequired;
+  recoveryRequired = serviceState?.ready === false;
+  ready = loggedIn && listLoaded && !listError && !statusError && serviceState?.ready === true && !serviceState.snapshotting;
+  $("#empty").hidden = !listLoaded || Boolean(listError) || configs.length !== 0;
+  const status = $("#service-status");
+  if (!loggedIn) status.textContent = "需要重新登录";
+  else if (listError || statusError) {
+    status.textContent = listError ? "配置列表读取失败" : "连接异常";
+    notify((listError || statusError).message, true, "status");
+  } else if (recoveryRequired) {
+    status.textContent = "需要恢复";
+    notify("存储存在未完成操作。请检查服务器磁盘和权限，然后重启管理端恢复。", true, "status");
+  } else if (serviceState?.snapshotting) {
+    status.textContent = "备份快照中";
+    notify("正在创建一致快照，配置写入暂缓。", false, "status");
+  } else {
+    status.textContent = ready ? "运行正常" : "正在连接";
+    if ($("#notice").dataset.source === "status") $("#notice").hidden = true;
+  }
+  if (wasReady !== ready || neededRecovery !== recoveryRequired) updateControls();
+}
+function needsConfigRefresh() {
+  return listError || (!recoveryRequired && configs.some(c => c.status !== "ready"));
+}
+function schedulePoll() {
+  if (pollTimer || polling || !$("#login-notice").hidden) return;
+  if (!(backupActive || needsConfigRefresh() || serviceState?.snapshotting || statusError)) return;
+  pollTimer = setTimeout(async () => {
+    pollTimer = null;
+    if (!$("#login-notice").hidden) return;
+    polling = true;
+    try {
+      await Promise.all([
+        loadStatus(),
+        needsConfigRefresh() && loadConfigs(),
+        backupActive && loadBackups()
+      ]);
+    } finally {
+      polling = false;
+      schedulePoll();
+    }
+  }, 2000);
+}
+function load() { return Promise.all([loadConfigs(), loadStatus()]); }
+async function loadConfigs() {
+  const generation = ++configGeneration;
+  try {
+    const items = await api("/api/configs").then(r => r.json());
+    if (generation !== configGeneration) return;
+    listError = null;
+    if (!listLoaded || JSON.stringify(items) !== JSON.stringify(configs)) {
+      listLoaded = true;
+      configs = items;
+      render();
+    }
+  } catch (error) {
+    if (generation !== configGeneration) return;
+    listError = error;
+  }
+  showAvailability();
+  schedulePoll();
+}
+async function loadStatus() {
+  const generation = ++statusGeneration;
+  try {
+    const state = await api("/api/status").then(r => r.json());
+    if (generation !== statusGeneration) return;
+    serviceState = state;
+    statusError = null;
+    maxUploadBytes = state.max_upload_bytes;
+    if (!$("#login-notice").hidden) {
+      $("#login-notice").hidden = true;
+      loadBackups();
+    }
+  } catch (error) {
+    if (generation !== statusGeneration) return;
+    statusError = error;
+  }
+  showAvailability();
+  schedulePoll();
 }
 function mutationBlocked() {
   if (busy) return "正在处理其他操作，请稍后重试。";
   if (!ready) return `${$("#service-status").textContent}，请等服务可写后重试。`;
   return "";
 }
-async function mutate(task, message, unchangedNotice = null, onError = err => notify(err.message, true)) {
+async function mutate(task, message, onError = err => notify(err.message, true)) {
   const reason = mutationBlocked();
   if (reason) { onError(new Error(reason)); return false; }
-  busy = true; render();
+  busy = true; updateControls();
   try { await task(); notify(message); return true; }
   catch (error) {
-    if (unchangedNotice && error.code === "unchanged") notify(unchangedNotice);
-    else onError(error);
+    onError(error);
     return false;
   }
-  finally { busy = false; await load(); }
+  finally { await load(); busy = false; updateControls(); }
 }
 async function copySubscription(base) {
   const text = api(`${base}/subscription-link`, {method: "POST"})
@@ -295,7 +379,7 @@ async function uploadFiles(files, config = null) {
   }
   if (busy) { notify("正在处理其他操作，请稍后再上传。", true); return; }
   uploadQueue = batch;
-  busy = true; render();
+  busy = true; updateControls();
   const reports = []; let failed = false;
   try {
     while (uploadQueue.length) {
@@ -315,7 +399,7 @@ async function uploadFiles(files, config = null) {
   } finally {
     uploadQueue = null;
     busy = false;
-    render();
+    updateControls();
   }
   notify(reports.join("\n"), failed);
 }
@@ -342,7 +426,7 @@ $("#rename-form").addEventListener("submit", async e => {
   if (Object.keys(fields).length === 1) { dialog.close(); return; }
   const saved = await mutate(() => api(`/api/configs/${config.id}`, {
     method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields)
-  }), "配置信息已更新。", null, error => {
+  }), "配置信息已更新。", error => {
     if (!dialog.open || editing !== config) return;
     if (error.code === "stale" && error.current) {
       if (!("name" in fields)) $("#rename-name").value = error.current.name;
@@ -362,6 +446,8 @@ let theme = "system";
 try { theme = localStorage.getItem("mcm-theme") || "system"; } catch (_) { /* storage can be disabled */ }
 function setTheme() { if (!["system", "light", "dark"].includes(theme)) theme = "system"; document.documentElement.dataset.theme = theme; $("#theme").textContent = { system: "跟随系统", light: "浅色模式", dark: "深色模式" }[theme]; }
 setTheme(); $("#theme").addEventListener("click", () => { theme = { system: "light", light: "dark", dark: "system" }[theme]; setTheme(); try { localStorage.setItem("mcm-theme", theme); } catch (_) {} });
+render();
+showAvailability();
 load();
 
 let historySession;
@@ -370,10 +456,17 @@ async function showHistory(config) {
   const session = {config};
   historySession = session;
   $("#history-error").textContent = "";
+  $("#history-status").textContent = "";
   $("#history-title").textContent = `历史版本 · ${config.name}`;
   $("#history-list").textContent = "正在读取版本…";
   if (!dialog.open) dialog.showModal();
   await refreshHistory(session);
+}
+function historyFeedback(session, message = "", error = false) {
+  if (!$("#history-dialog").open || historySession !== session) return;
+  $("#history-error").textContent = error ? message : "";
+  $("#history-status").textContent = error ? "" : message;
+  if (message) $(error ? "#history-error" : "#history-status").scrollIntoView({block: "nearest"});
 }
 async function refreshHistory(session) {
   const {config} = session;
@@ -385,8 +478,8 @@ async function refreshHistory(session) {
   } catch (error) {
     if (dialog.open && historySession === session) {
       $("#history-list").replaceChildren();
-      if (error.status === 404) dialog.close();
-      notify(error.status === 404 ? "配置已被删除" : error.message, true);
+      if (error.status === 404) { dialog.close(); notify("配置已被删除", true); }
+      else historyFeedback(session, error.message, true);
     }
     return;
   }
@@ -399,7 +492,17 @@ async function refreshHistory(session) {
     info.textContent = `版本 ${item.version}${item.is_current ? " · 当前" : ""}${item.source_version ? ` · 回滚自 ${item.source_version}` : ""} · ${item.filename} · ${bytes(item.size)} · ${new Date(item.created_at).toLocaleString()}\nSHA-256：${item.sha256}`;
     row.append(info);
     const preview = document.createElement("button"); preview.textContent = "预览";
-    preview.onclick = async () => { try { const r = await api(`/api/configs/${config.id}/versions/${item.version}/preview`); $("#preview-content").textContent = await r.text(); $("#preview-title").textContent = `${config.name} · 版本 ${item.version}`; $("#preview-dialog").showModal(); } catch(e) { notify(e.message, true); } };
+    preview.onclick = async () => {
+      historyFeedback(session);
+      try {
+        const r = await api(`/api/configs/${config.id}/versions/${item.version}/preview`);
+        const content = await r.text();
+        if (!dialog.open || historySession !== session) return;
+        $("#preview-content").textContent = content;
+        $("#preview-title").textContent = `${config.name} · 版本 ${item.version}`;
+        $("#preview-dialog").showModal();
+      } catch (error) { historyFeedback(session, error.message, true); }
+    };
     row.append(preview);
     if (!item.is_current && item.sha256 === current.sha256) {
       const note = document.createElement("span"); note.className = "history-note"; note.textContent = "内容与当前版本相同";
@@ -409,23 +512,29 @@ async function refreshHistory(session) {
       const sameContent = item.sha256 === current.sha256;
       const rollback = document.createElement("button");
       rollback.textContent = sameContent ? "校验并修复当前文件" : "回滚到此版本";
+      rollback.setAttribute("data-write", "");
       rollback.disabled = !ready || busy;
       rollback.onclick = async () => {
         const reason = mutationBlocked();
-        if (reason) { $("#history-error").textContent = reason; return; }
-        $("#history-error").textContent = "";
+        if (reason) { historyFeedback(session, reason, true); return; }
+        historyFeedback(session);
         const prompt = sameContent
           ? "校验当前文件？如果文件完整则跳过回滚，损坏时从此版本恢复。"
           : `回滚到版本 ${item.version}？将生成新版本，订阅链接和启停状态保持不变。`;
         if (!confirm(prompt)) return;
-        await mutate(
+        const success = sameContent ? `已从版本 ${item.version} 修复当前文件` : "回滚完成，订阅链接保持不变。";
+        const saved = await mutate(
           () => api(`/api/configs/${config.id}/versions/${item.version}/rollback`, {
             method: "POST", headers: {"Content-Type": "application/json"},
             body: JSON.stringify({expected_current_version: current.version})
           }),
-          sameContent ? `已从版本 ${item.version} 修复当前文件` : "回滚完成，订阅链接保持不变。",
-          sameContent ? "当前文件完整，无需修复" : null
+          success,
+          error => {
+            if (sameContent && error.code === "unchanged") historyFeedback(session, "当前文件完整，无需修复");
+            else historyFeedback(session, error.message, true);
+          }
         );
+        if (saved) historyFeedback(session, success);
         await refreshHistory(session);
       };
       row.append(rollback);
@@ -433,11 +542,16 @@ async function refreshHistory(session) {
     list.append(row);
   }
 }
-let backupTimer;
+let backupGeneration = 0;
+const backupDeleteErrors = new Map();
 async function loadBackups() {
-  clearTimeout(backupTimer);
+  const generation = ++backupGeneration;
+
   try {
     const {items, used_bytes, quota_bytes, max_bytes} = await api("/api/backups").then(r => r.json());
+    if (generation !== backupGeneration) return;
+    const listError = $("#backup-list-error");
+    if (listError.textContent) listError.textContent = "";
     $("#backup-quota").textContent = `已用 ${bytes(used_bytes)} / 上限 ${bytes(quota_bytes)} · 单次上限 ${bytes(max_bytes)}`;
     const list = $("#backup-list"); list.replaceChildren();
     const labels = {queued:"等待处理",snapshotting:"创建快照",encrypting:"加密中",ready:"已完成",failed:"创建失败",unregistered:"未登记的备份文件"};
@@ -447,22 +561,67 @@ async function loadBackups() {
       const text = document.createElement("p"); text.textContent = `${new Date(item.created_at).toLocaleString()} · ${labels[item.status]} · ${bytes(item.size)}${item.sha256 ? `\nSHA-256：${item.sha256}` : ""}`; row.append(text);
       if (item.error_code || item.filename) text.append(" · ", item.filename || reasons[item.error_code] || "请检查存储");
       if (item.status === "ready") { const a = document.createElement("a"); a.textContent = "下载加密备份"; a.href = `/api/backups/${item.id}/download`; a.download = ""; row.append(a); }
-      if (["ready","failed","unregistered"].includes(item.status)) { const b = document.createElement("button"); b.textContent = "删除"; b.onclick = async () => { if (!confirm("删除服务器上的这份备份？已下载的副本不受影响。")) return; try { await api(`/api/backups/${item.id}`, {method:"DELETE"}); await loadBackups(); } catch(e) {notify(e.message,true);} }; row.append(b); }
+      if (["ready","failed","unregistered"].includes(item.status)) {
+        const button = document.createElement("button");
+        button.textContent = "删除";
+        const feedback = document.createElement("p");
+        feedback.id = `backup-delete-error-${item.id}`;
+        if (backupDeleteErrors.has(item.id)) feedback.textContent = backupDeleteErrors.get(item.id);
+        else feedback.setAttribute("role", "alert");
+        button.onclick = async () => {
+          if (!confirm("删除服务器上的这份备份？已下载的副本不受影响。")) return;
+          backupDeleteErrors.delete(item.id);
+          feedback.textContent = "";
+          feedback.setAttribute("role", "alert");
+          try {
+            await api(`/api/backups/${item.id}`, {method: "DELETE"});
+            await loadBackups();
+          } catch (error) {
+            const current = document.getElementById(feedback.id);
+            if (current) {
+              backupDeleteErrors.set(item.id, error.message);
+              current.textContent = error.message;
+              current.scrollIntoView({block: "nearest"});
+            }
+          }
+        };
+        row.append(button, feedback);
+      }
       list.append(row);
     }
-    const active = items.some(i => !["ready","failed","unregistered"].includes(i.status));
-    $("#backup-new").disabled = active || !$("#login-notice").hidden;
-    if (active) backupTimer = setTimeout(() => {loadBackups(); load();}, 2000);
-  } catch(e) {notify(e.message,true);}
+    const wasActive = backupActive;
+    backupActive = items.some(i => !["ready","failed","unregistered"].includes(i.status));
+    $("#backup-new").disabled = backupActive || !$("#login-notice").hidden;
+    if (wasActive && !backupActive) await loadStatus();
+    schedulePoll();
+  } catch (error) {
+    if (generation === backupGeneration) {
+      const listError = $("#backup-list-error");
+      if (listError.textContent !== error.message) listError.textContent = error.message;
+      schedulePoll();
+    }
+  }
 }
-$("#backup-new").onclick = () => $("#backup-dialog").showModal();
+$("#backup-new").onclick = () => {
+  $("#backup-create-error").textContent = "";
+  $("#backup-dialog").showModal();
+};
 $("#backup-refresh").onclick = loadBackups;
-$("#backup-dialog").addEventListener("close", () => $("#backup-form").reset());
+const backupConfirm = $("#backup-confirm");
+$("#backup-form").addEventListener("input", () => backupConfirm.setCustomValidity(""));
+$("#backup-dialog").addEventListener("close", () => {
+  backupConfirm.setCustomValidity("");
+  $("#backup-form").reset();
+});
 $("#backup-form").onsubmit = async e => {
   e.preventDefault();
-  if ($("#backup-password").value !== $("#backup-confirm").value) {notify("两次密码不一致",true); return;}
+  if ($("#backup-password").value !== backupConfirm.value) {
+    backupConfirm.setCustomValidity("两次密码不一致");
+    backupConfirm.reportValidity();
+    return;
+  }
   let body = JSON.stringify({password:$("#backup-password").value});
   $("#backup-dialog").close(); $("#backup-form").reset();
-  try { await api("/api/backups", {method:"POST",headers:{"Content-Type":"application/json"},body}); await loadBackups(); } catch(e) {notify(e.message,true);} finally {body=null;}
+  try { await api("/api/backups", {method:"POST",headers:{"Content-Type":"application/json"},body}); await loadBackups(); } catch (error) { $("#backup-create-error").textContent = error.message; } finally {body=null;}
 };
 loadBackups();

@@ -20,6 +20,13 @@ SQLite 只由管理容器访问，开启 WAL、FULL 同步、外键和 5 秒 bus
 
 首次建库会写入 `data/db/.initialized`，旧部署在启动时补写。数据库缺失或版本为零且已有标记、私有配置、发布文件或备份时，启动会停止。保留整个数据目录，核实挂载并从加密备份恢复。有效数据库中的未知私有目录移入 `data/quarantine/`，运维人员可人工核查。运行期间修复当前文件时，仍存在的损坏条目也会移入隔离区，保留原有字节或符号链接。当前私有版本损坏仍会阻止管理端启动。
 
+若启动日志提示“配置 <ID> 的当前版本 <N> 文件缺失或校验失败”，可按以下步骤修复这一份文件：
+
+1. 停止 admin 并保存整个 `data` 目录的副本，保留 SQLite 的 WAL 文件和损坏文件供核查。
+2. 在部署目录以只读方式打开 `sqlite3 -readonly data/db/manager.sqlite3`，运行 `SELECT version, size, sha256 FROM versions WHERE config_id='<ID>' AND version=<N>;`，将占位符换成日志中的配置 ID 和版本号。
+3. 从保留的历史版本或已验证的加密备份中取回候选文件。用 `sha256sum` 和 `wc -c` 核对候选文件与上一步的摘要和字节数。只有完全匹配的原始文件才能用于单文件修复；找不到匹配文件时，使用完整备份恢复流程。
+4. 确认 `data/private/<ID>/versions` 及其父目录都是真实目录。将核对过的文件以 UID/GID `10001:10001`、权限 `0600` 写入该目录中的新临时文件，再重命名为 `<N>.yaml`。复核目标文件的 SHA-256，运行 `docker compose up -d --wait admin` 并检查健康状态。
+
 请勿手工换回旧的 `manager.sqlite3`。需要恢复旧状态时，使用加密备份恢复流程，它会更换全部订阅 Token。
 
 启动先核对当前版本与历史表的版本号、大小和摘要，再检查磁盘版本和发布凭据。发现非删除状态的配置缺少版本目录、跨越当前版本的更新文件，或数据库及待重放操作均未登记的 Token 发布文件时，管理端停止启动，保留这些文件供核查。仅多出下一版本文件符合提交前中断的情况，该文件移入 `data/quarantine/`。检查通过后才重放未完成操作、校验当前私有文件、修复发布副本并清理历史及临时文件。schema 2 没有独立的提交世代记录；如果数据库回退没有留下磁盘差异（例如只做过停用），启动检查无法识别这种回退。恢复失败则拒绝启动；运行中存储失败后暂停写入，界面提示需恢复，健康检查失败。修正磁盘或权限问题后：
@@ -46,7 +53,7 @@ docker compose ps
 ```sh
 git fetch --tags
 git checkout v新版本
-sh scripts/check-compose-project.sh
+sudo sh scripts/check-compose-project.sh
 docker compose build admin
 docker compose up -d --wait
 docker compose ps

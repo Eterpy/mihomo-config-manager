@@ -6,26 +6,29 @@ from email.message import Message
 from email.utils import collapse_rfc2231_value
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Path as PathParam
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.openapi.utils import get_openapi
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SecretStr
 from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException
 
 from .backups import Backups
 from .auth import AccessVerifier, CSRF, SecurityBoundary
-from .errors import AppError, MissingDatabase
+from .errors import AppError, CurrentVersionError, MissingDatabase
 from .services import Store
 from .settings import Settings
-from .validation import check_filename_chars, filename_valid, validate_yaml
+from .validation import check_filename_chars, description_valid, filename_valid, validate_yaml
 
 BASE = Path(__file__).parent
+VersionNumber = Annotated[int, PathParam(gt=0, le=2**63 - 1)]
 
 
 def archive_range(header, size):
@@ -68,7 +71,7 @@ class Rename(BaseModel):
     expected_updated_at: str
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=100)
-    description: str | None = Field(default=None, max_length=2000)
+    description: Annotated[str, BeforeValidator(description_valid), Field(max_length=2000)] | None = None
 
 
 class ConfigView(BaseModel):
@@ -98,7 +101,7 @@ def create_app(settings=None, verifier=None):
         try:
             app.state.store = await asyncio.to_thread(Store, settings)
             app.state.backups = await asyncio.to_thread(Backups, app.state.store)
-        except MissingDatabase:
+        except (MissingDatabase, CurrentVersionError):
             raise
         except Exception:
             if hasattr(app.state, "store"):
@@ -110,7 +113,7 @@ def create_app(settings=None, verifier=None):
             await asyncio.to_thread(app.state.backups.close)
             await asyncio.to_thread(app.state.store.close)
 
-    app = FastAPI(title="YAML Config Manager", version="0.4.0", lifespan=lifespan, docs_url=None, redoc_url=None,
+    app = FastAPI(title="YAML Config Manager", version="0.4.1", lifespan=lifespan, docs_url=None, redoc_url=None,
                   telemetry={"auto_configure": False, "tracing": False, "metrics": False, "logs": False, "operation_spans": False})
     app.state.settings = settings
     app.state.csrf = csrf
@@ -124,13 +127,14 @@ def create_app(settings=None, verifier=None):
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
-        for err in exc.errors():
-            if err["type"] != "missing":
-                continue
+        def missing_precondition(err):
             missing_revision = err["loc"][-1] in {"expected_updated_at", "expected_current_version"}
             missing_body = err["loc"] == ("body",) and request.scope["route"].name in {"rename", "rollback"}
-            if missing_revision or missing_body:
-                return JSONResponse({"detail": "缺少版本条件，请刷新页面后重试", "code": "precondition"}, status_code=428)
+            return err["type"] == "missing" and (missing_revision or missing_body)
+
+        errors = exc.errors()
+        if errors and all(missing_precondition(err) for err in errors):
+            return JSONResponse({"detail": "缺少版本条件，请刷新页面后重试", "code": "precondition"}, status_code=428)
         return JSONResponse({"detail": "请求参数不合法，请检查字段类型、长度与配置 ID"}, status_code=422)
 
     @app.exception_handler(HTTPException)
@@ -181,10 +185,9 @@ def create_app(settings=None, verifier=None):
             filename = filename_valid(file.filename)
             name = form.get("name", Path(filename).stem.strip()[:100] or filename.strip()[:100] or "未命名配置")
             description = form.get("description", "")
-            if not isinstance(name, str) or not isinstance(description, str) or len(description) > 2000:
-                raise AppError(422, "名称或说明格式错误，说明最长 2000 个字符")
-            if any(ord(c) == 0 for c in description):
-                raise AppError(422, "说明不能包含 NUL")
+            if not isinstance(name, str):
+                raise AppError(422, "名称格式错误", code="name_invalid")
+            description_valid(description)
             store = app.state.store
             fd, name_on_disk = tempfile.mkstemp(prefix="upload-", dir=store.incoming)
             path = Path(name_on_disk)
@@ -251,12 +254,12 @@ def create_app(settings=None, verifier=None):
         return await asyncio.to_thread(app.state.store.versions, str(config_id))
 
     @app.get("/api/configs/{config_id}/versions/{version}/preview")
-    async def historical_preview(config_id: UUID, version: int):
+    async def historical_preview(config_id: UUID, version: VersionNumber):
         data = await asyncio.to_thread(app.state.store.version_preview, str(config_id), version)
         return Response(data, media_type="text/plain; charset=utf-8")
 
     @app.post("/api/configs/{config_id}/versions/{version}/rollback", response_model=ConfigView)
-    async def rollback(config_id: UUID, version: int, values: Rollback):
+    async def rollback(config_id: UUID, version: VersionNumber, values: Rollback):
         return await asyncio.to_thread(app.state.store.rollback, str(config_id), version, values.expected_current_version)
 
     @app.post("/api/backups", status_code=202)

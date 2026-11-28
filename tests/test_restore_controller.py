@@ -228,6 +228,38 @@ def test_compose_conflicts_compare_physical_directories(controller):
     member.unlink()
     details.write_text('elsewhere\n' + str(alias / 'data') + '\n')
     assert check().returncode != 0
+    db = project / 'data/db/manager.sqlite3'
+    db.parent.mkdir()
+    db.touch()
+    file_alias = project.parent / 'database alias'
+    file_alias.symlink_to(db)
+    for mount in [alias / 'data/db/manager.sqlite3', file_alias]:
+        details.write_text(f'elsewhere\n{mount}\n')
+        assert check().returncode != 0
+    details.write_text(f'elsewhere\n{project / ".env"}\n')
+    assert check().returncode == 0
+
+
+def test_unresolvable_mount_blocks_preflight(controller):
+    project, env, _ = controller
+    alias = project.parent / 'alias'
+    alias.symlink_to(project)
+    data = project / 'data'
+    (data / 'db').mkdir(parents=True)
+    (data / 'db/manager.sqlite3').touch()
+    mount = alias / 'data/db/manager.sqlite3'
+    (project / 'foreign').write_text(f'owner=/former/deployment\n{mount}\n')
+    # Also exercise the lookup failure when the test runner can traverse mode 000 (root).
+    realpath = project.parent / 'bin/realpath'
+    realpath.write_text('#!/bin/sh\nexit 1\n')
+    realpath.chmod(0o700)
+    data.chmod(0)
+    try:
+        result = subprocess.run(['sh', 'scripts/check-compose-project.sh'], cwd=project, env=env,
+                                capture_output=True, text=True)
+        assert result.returncode != 0 and '无法核实容器路径' in result.stderr
+    finally:
+        data.chmod(0o700)
 
 
 @pytest.mark.parametrize('fault,message', [('password', '密码错误'), ('tamper', '文件已被修改'),

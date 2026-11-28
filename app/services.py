@@ -1,4 +1,5 @@
-from contextlib import closing
+from contextlib import ExitStack, closing, contextmanager, suppress
+import errno
 import fcntl
 import hashlib
 import logging
@@ -14,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .database import Database
-from .errors import AppError, MissingDatabase
+from .errors import AppError, CurrentVersionError, MissingDatabase
 from .settings import Settings
 from .validation import display_name
 
@@ -54,18 +55,33 @@ def sync_dir(path: Path):
 
 def atomic_copy(source: Path, destination: Path, mode=0o600):
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, name = tempfile.mkstemp(prefix=".pending-", dir=destination.parent)
-    temporary = Path(name)
+    with open_directory(destination.parent) as directory:
+        atomic_copy_into(source, directory, destination.name, mode)
+
+
+@contextmanager
+def open_directory(path, parent=None):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def atomic_copy_into(source, directory, filename, mode):
+    temporary = ".pending-" + uuid.uuid4().hex
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
     try:
         with os.fdopen(fd, "wb") as out, source.open("rb") as src:
             shutil.copyfileobj(src, out, length=64 * 1024)
             out.flush()
             os.fchmod(out.fileno(), mode)
             os.fsync(out.fileno())
-        os.replace(temporary, destination)
-        sync_dir(destination.parent)
+        os.replace(temporary, filename, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
     finally:
-        temporary.unlink(missing_ok=True)
+        with suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=directory)
 
 
 class Store:
@@ -183,16 +199,34 @@ class Store:
                 return token
         raise AppError(503, "暂时无法生成唯一订阅凭据，请重试")
 
-    def _store_version(self, source, config_id, version):
-        destination = self._version_path(config_id, version)
-        atomic_copy(source, destination)
-        sync_dir(destination.parent.parent)
-        sync_dir(self.private)
+    @contextmanager
+    def _version_directory(self, config_id, *, create=False):
+        # Pin each directory so a later path lookup cannot redirect a version write.
+        with ExitStack() as stack:
+            try:
+                parent = stack.enter_context(open_directory(self.private))
+                for name in (str(uuid.UUID(config_id)), "versions"):
+                    if create:
+                        os.mkdir(name, 0o700, dir_fd=parent)
+                        os.fsync(parent)
+                    parent = stack.enter_context(open_directory(name, parent))
+            except OSError as exc:
+                if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EEXIST}:
+                    raise AppError(503, "私有版本目录异常") from None
+                raise
+            yield parent
+
+    def _current_source(self, row):
+        source = self._version_path(row["id"], row["version"])
+        try:
+            if version_matches(source, row):
+                return source
+        except OSError:
+            pass
+        raise CurrentVersionError(row["id"], row["version"])
 
     def _publish(self, row):
-        source = self._version_path(row["id"], row["version"])
-        if not version_matches(source, row):
-            raise OSError("private version integrity failure")
+        source = self._current_source(row)
         destination = self._token_path(row["token"])
         if destination.is_symlink() or not destination.exists() or digest(destination) != row["sha256"]:
             atomic_copy(source, destination, 0o644)
@@ -222,22 +256,23 @@ class Store:
             self._publish(row)
         else:
             self._withdraw(row["token"])
+        self._prune(config_id)
         with self.db.connect() as con:
             con.execute("UPDATE configs SET status = 'ready' WHERE id = ?", (config_id,))
             con.execute("DELETE FROM operations WHERE config_id = ?", (config_id,))
-        self._prune(config_id)
 
     def _prune(self, config_id):
-        with self.db.connect() as con:
-            rows = con.execute("SELECT version FROM versions WHERE config_id = ? ORDER BY version DESC", (config_id,)).fetchall()
-            keep = {r["version"] for r in rows[:self.settings.history_versions + 1]}
-            for row in rows[self.settings.history_versions + 1:]:
-                con.execute("DELETE FROM versions WHERE config_id = ? AND version = ?", (config_id, row["version"]))
-        directory = self.private / config_id / "versions"
-        for file in directory.iterdir():
-            if file.name not in {f"{v}.yaml" for v in keep}:
-                file.unlink()
-        sync_dir(directory)
+        with self._version_directory(config_id) as directory:
+            with self.db.connect() as con:
+                rows = con.execute("SELECT version FROM versions WHERE config_id = ? ORDER BY version DESC", (config_id,)).fetchall()
+                retain = self.settings.history_versions + 1
+                keep = {f'{r["version"]}.yaml' for r in rows[:retain]}
+                for row in rows[retain:]:
+                    con.execute("DELETE FROM versions WHERE config_id = ? AND version = ?", (config_id, row["version"]))
+            for name in os.listdir(directory):
+                if name not in keep:
+                    os.unlink(name, dir_fd=directory)
+            os.fsync(directory)
 
     def _inspect_recovery(self, con):
         """Read all evidence before replaying any operation or removing files."""
@@ -310,9 +345,7 @@ class Store:
                 if row["enabled"]:
                     self._publish(row)
                 else:
-                    source = self._version_path(row["id"], row["version"])
-                    if not version_matches(source, row):
-                        raise OSError("private version integrity failure")
+                    self._current_source(row)
                 self._prune(row["id"])
             known = {r["id"] for r in rows}
             isolated = len(uncommitted)
@@ -332,7 +365,7 @@ class Store:
     def _complete(self, config_id):
         try:
             self._finish(config_id)
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error, AppError):
             self.failed = True
             log.error("storage_operation_pending config_id=%s", config_id)
             raise AppError(503, "操作未完成，请检查磁盘和权限后重启管理端恢复") from None
@@ -347,7 +380,8 @@ class Store:
                     if con.execute("SELECT 1 FROM configs WHERE name = ?", (name,)).fetchone():
                         raise AppError(409, "显示名称已存在，请修改名称")
                     token = self._new_token(con)
-                    self._store_version(source, config_id, 1)
+                    with self._version_directory(config_id, create=True) as directory:
+                        atomic_copy_into(source, directory, "1.yaml", 0o600)
                     size, sha = source.stat().st_size, digest(source)
                     con.execute("INSERT INTO configs VALUES (?, ?, ?, ?, ?, ?, 1, ?, 1, 'pending', ?, ?)", (config_id, name, description, filename, size, sha, token, stamp, stamp))
                     con.execute("INSERT INTO versions (config_id,version,filename,size,sha256,created_at) VALUES (?, 1, ?, ?, ?, ?)", (config_id, filename, size, sha, stamp))
@@ -366,20 +400,21 @@ class Store:
                     row = self._row(con, config_id)
                     if expected_current_version is not None:
                         self.check_revision(row, "version", expected_current_version)
-                    sha = digest(source)
-                    if sha == row["sha256"]:
-                        current_path = self._version_path(config_id, row["version"])
-                        if version_matches(current_path, row):
-                            message = "文件内容相同，未生成新版本" if source_version is None else "所选版本与当前版本内容相同，无需回滚"
-                            if row["enabled"]:
-                                self._publish(row)
-                            raise AppError(409, message, code="unchanged", current=self._view(row))
-                        # Restore the retained history entry as well as creating the new current version.
-                        if current_path.exists() or current_path.is_symlink():
-                            self._quarantine(current_path)
-                        self._store_version(source, config_id, row["version"])
-                    version, stamp = row["version"] + 1, next_update(row["updated_at"])
-                    self._store_version(source, config_id, version)
+                    with self._version_directory(config_id) as directory:
+                        sha = digest(source)
+                        if sha == row["sha256"]:
+                            current_path = self._version_path(config_id, row["version"])
+                            if version_matches(current_path, row):
+                                message = "文件内容相同，未生成新版本" if source_version is None else "所选版本与当前版本内容相同，无需回滚"
+                                if row["enabled"]:
+                                    self._publish(row)
+                                raise AppError(409, message, code="unchanged", current=self._view(row))
+                            # Restore the retained history entry as well as creating the new current version.
+                            if current_path.exists() or current_path.is_symlink():
+                                self._quarantine(current_path)
+                            atomic_copy_into(source, directory, current_path.name, 0o600)
+                        version, stamp = row["version"] + 1, next_update(row["updated_at"])
+                        atomic_copy_into(source, directory, f"{version}.yaml", 0o600)
                     size = source.stat().st_size
                     con.execute("INSERT INTO versions (config_id,version,filename,size,sha256,created_at,source_version) VALUES (?, ?, ?, ?, ?, ?, ?)", (config_id, version, filename, size, sha, stamp, source_version))
                     con.execute("UPDATE configs SET filename=?, size=?, sha256=?, version=?, updated_at=?, status='pending' WHERE id=?", (filename, size, sha, version, stamp, config_id))
